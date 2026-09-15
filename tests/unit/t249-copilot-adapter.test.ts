@@ -901,6 +901,44 @@ describe("t249 Copilot hook adapter (live-captured payload fixtures)", () => {
     expect(audit).toContain("added.ts");
   });
 
+  test("17b: CLI toolArgs patch text records every successful artifact write", () => {
+    const dir = scratchProject(true);
+    const record = seededRecordDir(dir);
+    const first = join(record, "ideation", "intent-capture", "intent-statement.md");
+    const second = join(dirname(first), "stakeholder-map.md");
+    mkdirSync(dirname(first), { recursive: true });
+    writeFileSync(first, "# Intent\n");
+    writeFileSync(second, "# Stakeholders\n");
+    const result = runAdapter(dir, "post-tool", {
+      sessionId: "cli-artifact-writes",
+      cwd: dir,
+      toolName: "apply_patch",
+      toolArgs: `*** Begin Patch\n*** Add File: ${first}\n+# Intent\n*** Add File: ${second}\n+# Stakeholders\n*** End Patch\n`,
+      toolResult: { resultType: "success", textResultForLlm: "Added 2 file(s)" },
+    });
+    expect(result.code, result.stderr).toBe(0);
+    const audit = readAudit(dir);
+    expect(audit.match(/\*\*Event\*\*: ARTIFACT_CREATED/g)?.length).toBe(2);
+    expect(audit).toContain("intent-statement.md");
+    expect(audit).toContain("stakeholder-map.md");
+  });
+
+  test("17c: a failed patch cannot certify an existing artifact", () => {
+    const dir = scratchProject(true);
+    const artifact = join(seededRecordDir(dir), "ideation", "intent-capture", "intent-statement.md");
+    mkdirSync(dirname(artifact), { recursive: true });
+    writeFileSync(artifact, "# Prior attempt\n");
+    const result = runAdapter(dir, "post-tool", {
+      cwd: dir,
+      tool_name: "apply_patch",
+      tool_input: { input: `*** Begin Patch\n*** Update File: ${artifact}\n@@\n-missing base\n+replacement\n*** End Patch\n` },
+      tool_result: { result_type: "failure", text_result_for_llm: "Failed to find expected lines" },
+    });
+    expect(result.code, result.stderr).toBe(0);
+    expect(readAudit(dir)).not.toContain("ARTIFACT_UPDATED");
+    expect(readFileSync(artifact, "utf-8")).toBe("# Prior attempt\n");
+  });
+
   test("18: VS Code agent_type/agent_id populate and clear reviewer identity", () => {
     const dir = scratchProject(true);
     const hostSessionId = "11111111-2222-4333-8444-555555555555";

@@ -89,8 +89,9 @@ interface CopilotHookInput {
   reason?: string;
   tool_name?: string;
   toolName?: string;
-  tool_input?: Record<string, unknown>;
-  toolInput?: Record<string, unknown>;
+  tool_input?: Record<string, unknown> | string;
+  toolInput?: Record<string, unknown> | string;
+  toolArgs?: Record<string, unknown> | string;
   tool_result?: unknown; toolResult?: unknown; tool_response?: unknown; toolResponse?: unknown;
   tool_use_id?: string; toolUseId?: string; tool_call_id?: string; toolCallId?: string;
   agent_name?: string;
@@ -109,7 +110,62 @@ interface CopilotHookInput {
 export async function run(
   target: string,
   input: string,
+  extraArgs: string[] = [],
+): Promise<number> {
+  // CLI PreToolUse may batch calls while PostToolUse uses toolName/toolArgs.
+  // Keep one response per host invocation: every call must pass its guards.
+  let payload: Record<string, unknown> | null = null;
+  try { payload = objectFields(JSON.parse(input)); } catch { /* handled below */ }
+  if (target !== "guard-tool-call" || !Array.isArray(payload?.toolCalls)) {
+    return runCanonical(target, input, extraArgs);
+  }
+  const { toolCalls, ...common } = payload;
+  const calls = toolCalls as unknown[];
+  for (const entry of calls) {
+    const call = objectFields(entry);
+    if (!call || typeof call.name !== "string") continue;
+    let output = "";
+    const code = await runCanonical(target, JSON.stringify({
+      ...common,
+      tool_name: call.name,
+      tool_input: call.args,
+      tool_use_id: call.id,
+    }), extraArgs, (text) => { output += text; }, calls.length > 1);
+    let response: Record<string, unknown> | null = null;
+    try { response = objectFields(JSON.parse(output)); } catch { /* silent allow */ }
+    const specific = objectFields(response?.hookSpecificOutput);
+    if (code !== 0 || specific?.permissionDecision === "deny") {
+      process.stdout.write(output);
+      return code;
+    }
+    if (specific?.updatedInput) {
+      process.stdout.write(calls.length === 1 ? output : batchRewriteDenial());
+      return 0;
+    }
+  }
+  return 0;
+}
+
+function objectFields(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function batchRewriteDenial(): string {
+  return `${JSON.stringify({ hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "deny",
+    permissionDecisionReason: "Run these tool calls separately so AI-DLC can apply each required input update.",
+  } })}\n`;
+}
+
+async function runCanonical(
+  target: string,
+  input: string,
   _extraArgs: string[] = [],
+  emit: (text: string) => void = (text) => { process.stdout.write(text); },
+  batched = false,
 ): Promise<number> {
   let copilot: CopilotHookInput = {};
   if (input.length > 0) {
@@ -141,7 +197,17 @@ export async function run(
     copilot.agent_type ?? copilot.agent_name ?? copilot.agentName ?? "";
   const explicitSubagentId = copilot.agent_id ?? copilot.agentId ?? "";
   const subagentId = explicitSubagentId || sessionId;
-  const nativeToolInput = copilot.tool_input ?? copilot.toolInput;
+  const rawToolInput = copilot.tool_input ?? copilot.toolInput ?? copilot.toolArgs;
+  const nativeToolInput = (() => {
+    if (typeof rawToolInput !== "string") return rawToolInput;
+    // JSON-encoded arguments and the freeform apply_patch text both occur on
+    // the CLI. A patch string must become the envelope the target parser reads.
+    try {
+      const parsed = objectFields(JSON.parse(rawToolInput));
+      if (parsed) return parsed;
+    } catch { /* freeform text */ }
+    return { input: rawToolInput };
+  })();
 
   // Canonicalize the tool name across the two surfaces. The CLI sends
   // Claude-style names (Bash/Write/Edit/Read — live-captured); VS Code agent
@@ -476,7 +542,7 @@ export async function run(
     if (args[0] === "engine" && args[1] === "orchestrate") args = args.slice(2);
     if (args[0] === "--resume") args = ["next", "--resume", ...args.slice(1)];
     const normalized: string[] = [];
-    let attemptId = safeAttemptId(copilot.tool_use_id);
+    let attemptId = safeAttemptId(copilot.tool_use_id ?? copilot.toolUseId ?? copilot.tool_call_id ?? copilot.toolCallId);
     for (let i = 0; i < args.length; i++) {
       if (args[i] === ATTEMPT_FLAG) {
         const carried = args[++i];
@@ -900,7 +966,7 @@ export async function run(
         try {
           const parsed = JSON.parse(r.stdout) as Record<string, unknown>;
           const additionalContext = parsed.additionalContext;
-          process.stdout.write(`${JSON.stringify({
+          emit(`${JSON.stringify({
             ...parsed,
             ...(typeof additionalContext === "string"
               ? {
@@ -912,7 +978,7 @@ export async function run(
               : {}),
           })}\n`);
         } catch {
-          process.stdout.write(r.stdout);
+          emit(r.stdout);
         }
       }
       return 0;
@@ -956,7 +1022,7 @@ export async function run(
         NATIVE_QUESTION_PICKERS.has(rawToolName) &&
         selectedWorkflowIsRunning()
       ) {
-        process.stdout.write(denyJson(
+        emit(denyJson(
           "Render this AI-DLC question as numbered prose in chat per question-rendering.md, then end the turn and wait for the user's next chat message. Native picker answers do not fire UserPromptSubmit, so they cannot record the trusted HUMAN_TURN required for answer and approval logging.",
         ));
         return 0;
@@ -968,7 +1034,7 @@ export async function run(
           canonicalInput,
         );
         if (dispatch.code === 2) {
-          process.stdout.write(denyJson(dispatch.stderr));
+          emit(denyJson(dispatch.stderr));
           return 0;
         }
         let dispatchInput = nativeToolInput ?? {};
@@ -1005,10 +1071,10 @@ export async function run(
           }),
         );
         if (planApproval.code === 2) {
-          process.stdout.write(denyJson(planApproval.stderr));
+          emit(denyJson(planApproval.stderr));
           return 0;
         }
-        if (dispatch.stdout) process.stdout.write(dispatch.stdout);
+        if (dispatch.stdout) emit(dispatch.stdout);
         return 0;
       }
 
@@ -1017,7 +1083,7 @@ export async function run(
       if (toolName === "Bash") {
         const command = orchestrationCommand();
         if (command.status === "foreign") {
-          process.stdout.write(denyJson("This AI-DLC command targets a different physical project. Run it from that project's own Copilot session."));
+          emit(denyJson("This AI-DLC command targets a different physical project. Run it from that project's own Copilot session."));
           return 0;
         }
         const guard = runCoreWithStderr(
@@ -1025,7 +1091,7 @@ export async function run(
           withAgentType(canonicalInput, delegatedAgentType()),
         );
         if (guard.code === 2) {
-          process.stdout.write(denyJson(guard.stderr));
+          emit(denyJson(guard.stderr));
           return 0;
         }
         const scope = runCoreWithStderr(
@@ -1033,7 +1099,7 @@ export async function run(
           withAgentType(canonicalInput),
         );
         if (scope.code === 2) {
-          process.stdout.write(denyJson(scope.stderr));
+          emit(denyJson(scope.stderr));
           return 0;
         }
         const freeze = runCoreWithStderr(
@@ -1041,7 +1107,7 @@ export async function run(
           canonicalInput,
         );
         if (freeze.code === 2) {
-          process.stdout.write(denyJson(freeze.stderr));
+          emit(denyJson(freeze.stderr));
           return 0;
         }
         const planApproval = runCoreWithStderr(
@@ -1049,15 +1115,21 @@ export async function run(
           canonicalInput,
         );
         if (planApproval.code === 2) {
-          process.stdout.write(denyJson(planApproval.stderr));
+          emit(denyJson(planApproval.stderr));
           return 0;
         }
         if (command.status === "unsupported") {
-          process.stdout.write(denyJson("Use one simple direct, source-dispatcher, or compiled AI-DLC command without chaining, substitution, or redirection other than one terminal `2>&1`."));
+          emit(denyJson("Use one simple direct, source-dispatcher, or compiled AI-DLC command without chaining, substitution, or redirection other than one terminal `2>&1`."));
           return 0;
         }
         if (command.status === "recognized") {
           if (!sessionId) return 0;
+          // Do not claim coordination state for a batch the host cannot
+          // rewrite per call. The separately submitted command will claim it.
+          if (batched) {
+            emit(batchRewriteDenial());
+            return 0;
+          }
           let claimed: ReturnType<typeof claimCopilotCommand>;
           try { claimed = claimCopilotCommand(projectDir, currentState(), command.claim); }
           catch (error) {
@@ -1065,7 +1137,7 @@ export async function run(
                 error.name === "ActiveDirectiveLockContendedError"
               ? "AI-DLC coordination is busy and no claim was committed. Retry this exact command and the same continuation token, when present."
               : recoveryReason;
-            process.stdout.write(denyJson(reason));
+            emit(denyJson(reason));
             return 0;
           }
           if (!claimed.allowed) {
@@ -1078,11 +1150,11 @@ export async function run(
                 : claimed.reason === "state"
                   ? "The workflow state changed before this command could be claimed. Run a fresh `next`; do not reuse the previous continuation token."
                   : recoveryReason;
-            process.stdout.write(denyJson(reason));
+            emit(denyJson(reason));
             return 0;
           }
           const modifiedArgs = { ...(nativeToolInput ?? {}), command: command.rewrite(claimed.attemptId) };
-          process.stdout.write(`${JSON.stringify({ modifiedArgs, hookSpecificOutput: {
+          emit(`${JSON.stringify({ modifiedArgs, hookSpecificOutput: {
             hookEventName: "PreToolUse",
             updatedInput: modifiedArgs,
           } })}\n`);
@@ -1144,7 +1216,7 @@ export async function run(
           });
           const r = runCoreWithStderr("aidlc-reviewer-scope.ts", fwd);
           if (r.code === 2) {
-            process.stdout.write(denyJson(r.stderr));
+            emit(denyJson(r.stderr));
             return 0;
           }
         }
@@ -1159,7 +1231,7 @@ export async function run(
               }),
             );
             if (freeze.code === 2) {
-              process.stdout.write(denyJson(freeze.stderr));
+              emit(denyJson(freeze.stderr));
               return 0;
             }
             const planApproval = runCoreWithStderr(
@@ -1171,7 +1243,7 @@ export async function run(
               }),
             );
             if (planApproval.code === 2) {
-              process.stdout.write(denyJson(planApproval.stderr));
+              emit(denyJson(planApproval.stderr));
               return 0;
             }
           }
@@ -1184,6 +1256,15 @@ export async function run(
       // Matcher-free registration: self-filter on tool_name (the IDE ignores
       // matchers — difference in the wiring header). Advisory targets only.
       if (toolName === "Write" || toolName === "Edit") {
+        // A failed multi-file patch may have changed an earlier hunk. It is
+        // still not evidence that every requested output was written. Require
+        // a successful re-save; never certify the whole failed request.
+        for (const result of [copilot.tool_result, copilot.toolResult, copilot.tool_response, copilot.toolResponse]) {
+          const fields = objectFields(result);
+          if (!fields) continue;
+          const kind = fields.result_type ?? fields.resultType;
+          if (kind === "failure" || kind === "error" || fields.success === false || fields.tool_success === false) return 0;
+        }
         for (
           const target of mutationTargetsOf(
             nativeToolInput,
@@ -1314,7 +1395,7 @@ export async function run(
           const parsed = JSON.parse(r.stdout) as Record<string, unknown>;
           const decision = parsed.decision;
           const reason = parsed.reason;
-          process.stdout.write(`${JSON.stringify({
+          emit(`${JSON.stringify({
             ...parsed,
             ...(typeof decision === "string"
               ? {
@@ -1327,7 +1408,7 @@ export async function run(
               : {}),
           })}\n`);
         } catch {
-          process.stdout.write(r.stdout);
+          emit(r.stdout);
         }
       }
       return r.code;
