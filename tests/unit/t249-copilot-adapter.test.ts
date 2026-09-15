@@ -1219,6 +1219,30 @@ describe("t249 Copilot hook adapter (live-captured payload fixtures)", () => {
     expect(audit).toContain("added.ts");
   });
 
+  test("17b2: a patch envelope under the Claude-style Edit name records its writes", () => {
+    const dir = scratchProject(true);
+    const record = seededRecordDir(dir);
+    const first = join(record, "ideation", "intent-capture", "intent-statement.md");
+    const second = join(dirname(first), "stakeholder-map.md");
+    mkdirSync(dirname(first), { recursive: true });
+    writeFileSync(first, "# Intent\n");
+    writeFileSync(second, "# Stakeholders\n");
+    const patch = `*** Begin Patch\n*** Add File: ${first}\n+# Intent\n*** Update File: ${second}\n@@\n+# Stakeholders\n*** End Patch\n`;
+    for (const tool_input of [patch, { input: patch }]) {
+      const result = runAdapter(dir, "post-tool", {
+        hook_event_name: "PostToolUse",
+        cwd: dir,
+        tool_name: "Edit",
+        tool_input,
+      });
+      expect(result.code, result.stderr).toBe(0);
+    }
+    const audit = readAudit(dir);
+    expect(audit.match(/\*\*Event\*\*: ARTIFACT_CREATED/g)?.length).toBe(2);
+    expect(audit.match(/\*\*Event\*\*: ARTIFACT_UPDATED/g)?.length).toBe(2);
+    expect(audit).toContain("stakeholder-map.md");
+  });
+
   test("18: VS Code agent_type/agent_id populate and clear reviewer identity", () => {
     const dir = scratchProject(true);
     const hostSessionId = "11111111-2222-4333-8444-555555555555";
