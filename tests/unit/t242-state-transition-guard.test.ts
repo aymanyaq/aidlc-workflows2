@@ -12,6 +12,7 @@ import {
   DELEGATED_STATE_MUTATIONS,
   delegatedLifecycleCommand,
   directStateTransition,
+  inlineGuardBypass,
   isLifecycleBoundaryCommand,
 } from "../../dist/claude/.claude/hooks/aidlc-state-transition-guard.ts";
 import { violatesRuntimeIntegrity } from "../../dist/claude/.claude/hooks/runtime-integrity.ts";
@@ -1442,6 +1443,45 @@ describe("t242 state-transition ownership guard", () => {
         expect(r.stderr, mode).toContain("AIDLC runtime records and hooks belong to the harness");
       }
     }
+  });
+
+  test("a guard off-switch assigned on the agent's own command is found; quoted or searched text is not", () => {
+    for (const [command, name] of [
+      [
+        "AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD=1 AIDLC_SKIP_HUMAN_PRESENCE_GUARD=1 ./.aidlc/aidlc engine log answer --stage approval-handoff",
+        "AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD",
+      ],
+      ["cd /tmp && env AIDLC_SKIP_HUMAN_PRESENCE_GUARD=1 bun .claude/tools/aidlc-log.ts answer", "AIDLC_SKIP_HUMAN_PRESENCE_GUARD"],
+      ["export AIDLC_DISABLE_SUMMARY_CONFIRMATION=1; aidlc engine orchestrate next", "AIDLC_DISABLE_SUMMARY_CONFIRMATION"],
+    ] as const) {
+      expect(inlineGuardBypass(command), command).toBe(name);
+    }
+    for (const command of [
+      "rg -n 'AIDLC_SKIP_HUMAN_PRESENCE_GUARD=1' .aidlc/tools",
+      "echo AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD=1",
+      "cat <<'EOF' > notes.md\nAIDLC_SKIP_HUMAN_PRESENCE_GUARD=1 aidlc engine orchestrate next\nEOF",
+      "AIDLC_SKIP_SOURCE_FRESHNESS=1 aidlc engine worktree merge",
+    ]) {
+      expect(inlineGuardBypass(command), command).toBeNull();
+    }
+
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify({
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: {
+          command:
+            "AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD=1 aidlc engine log answer --stage approval-handoff",
+        },
+      }),
+      encoding: "utf-8",
+      env: unownedEnv(),
+    });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain(
+      "AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD cannot be set on an agent's command",
+    );
+    expect(r.stderr).toContain("Only a person turns a guard off");
   });
 
   test("the Claude hook exits 2 with a redirecting stderr reason", () => {
