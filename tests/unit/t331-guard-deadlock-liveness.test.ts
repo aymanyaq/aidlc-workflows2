@@ -1895,11 +1895,15 @@ describe("AttemptView projections and refusal streaks", () => {
     expect(first.count).toBe(1);
     expect(first.ask.reason_codes).toEqual(["SUMMARY_EVIDENCE_INVALID"]);
     expect(first.ask.question).toContain("would be refused");
+    expect(first.ask.question).toContain("summary blocked");
     expect(recordGuardRefusal(project, refusalB, attempt).count).toBe(1);
     expect(recordGuardRefusal(project, refusalA, attempt).count).toBe(2);
     const capped = recordGuardRefusal(project, refusalB, attempt);
     expect(capped.count).toBe(3);
     expect(capped.ask.question).toContain("has refused artifact-write 3 times");
+    // Re-framing a repetition never costs the sentence that says WHY: a
+    // conductor that loses it on the second refusal can only repeat its guess.
+    expect(capped.ask.question).toContain("write blocked");
     expect(capped.ask.reason_codes).toEqual([
       "REVIEW_FREEZE_ACTIVE",
       "SUMMARY_EVIDENCE_INVALID",
@@ -1935,6 +1939,52 @@ describe("AttemptView projections and refusal streaks", () => {
     const view = guardRefusalStreakView(project, refusalA, attempt);
     expect(view.count).toBe(2);
     expect(guardRefusalStreakView(project, refusalA, attempt).count).toBe(2);
+  });
+
+  test("a recovery ask names the record the guard refused, on every repetition", () => {
+    const project = mkdtempSync(join(tmpdir(), "aidlc-guard-liveness-"));
+    projects.push(project);
+    const attempt = {
+      floor: "floor-1",
+      recovery: "spent" as const,
+      summaryCoverage: "stale" as const,
+      reviewCoverage: "current" as const,
+      sourceCoverage: "current" as const,
+    };
+    // The remedy for this code is phrased for every refusal that carries it
+    // ("re-save the produced artifacts"). Which of a stage's outputs is at
+    // fault, and how it fell short, lives ONLY in the refusal sentence. A
+    // conductor that receives the code without the sentence repairs whichever
+    // output it guesses, is refused identically, and asks again.
+    const refusal = evaluateGuardRefusal({
+      code: "SUMMARY_ARTIFACT_UNAUTHORIZED",
+      blockedAction: "summary-confirmation",
+      stage: "approval-handoff",
+      stateContent: state("-"),
+      invariant: "An output descends from the confirmation that authorized it.",
+      userMessage:
+        'Refusing to continue "approval-handoff": this stage\'s output ' +
+        "document ideation/approval-handoff/initiative-brief.md was last " +
+        "saved before the confirmed answers. Save the document again, so its " +
+        "write descends from the current confirmation, then continue.",
+      attempt,
+      humanAuthority: { freshTurn: true, unattended: false },
+    });
+    const ask = guardRecoveryAskForRefusal(refusal);
+    expect(ask).not.toBeNull();
+    expect((ask as NonNullable<typeof ask>).remedies.length).toBeGreaterThan(0);
+    for (const streak of [
+      recordGuardRefusal(project, refusal, attempt),
+      recordGuardRefusal(project, refusal, attempt),
+      recordGuardRefusal(project, refusal, attempt),
+    ]) {
+      expect(streak.ask.question).toContain("initiative-brief.md");
+      expect(streak.ask.question).toContain("Save the document again");
+      expect(streak.ask.question).toContain(
+        "authority-preserving recovery action",
+      );
+      expect(validateDirective(streak.ask).valid).toBe(true);
+    }
   });
 
   test("a refusal with no executable remedy is a terminal ask, never an error and never a silent count", () => {

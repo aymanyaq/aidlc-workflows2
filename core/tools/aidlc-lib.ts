@@ -24258,10 +24258,14 @@ export function guardRefusalStreakView(
         ? {
             ...ask,
             reason_codes: codes,
-            question:
+            // A repetition is exactly where the refusal sentence matters most:
+            // the previous attempt repaired the wrong record, and only this
+            // sentence says which one the guard is still refusing.
+            question: guardRecoveryQuestion(
+              refusal,
               `The same guard state for "${refusal.stage}" has refused ` +
-              `${refusal.blockedAction} ${count} times. Choose one ` +
-              "authority-preserving recovery action.",
+                `${refusal.blockedAction} ${count} times.`,
+            ),
           }
         : ask,
     };
@@ -24305,13 +24309,33 @@ export function recordGuardRefusal(
   return streak;
 }
 
+// The recovery ask's question: what is refused, WHY in the guard's own words,
+// then the instruction. The refusal sentence is the only half that names the
+// record at fault and how it fell short — which output document was never
+// written under the current confirmation, which review is outstanding. Without
+// it the conductor reads a reason code and a remedy phrased for every refusal
+// that shares it, so it repairs whichever record it guesses, is refused
+// identically, and asks again. The terminal ask has always carried this
+// sentence; the ask that still HAS a way out is the one that needs it.
+function guardRecoveryQuestion(
+  refusal: GuardRefusal,
+  situation: string,
+): string {
+  const why = refusal.userMessage.trim();
+  return (
+    `${situation}${why.length > 0 ? ` ${why}` : ""} Choose one ` +
+    "authority-preserving recovery action."
+  );
+}
+
 // The ask for a refusal that has at least one executable remedy: the remedies
 // the conductor may offer now, and nothing else.
 export function guardRecoveryAskForRefusal(
   refusal: GuardRefusal,
-  question =
-    `The next action for "${refusal.stage}" would be refused. Choose one ` +
-    "authority-preserving recovery action.",
+  question = guardRecoveryQuestion(
+    refusal,
+    `The next action for "${refusal.stage}" would be refused.`,
+  ),
 ): GuardRecoveryAskData | null {
   const remedies = refusal.remedies.filter((remedy) => remedy.executableNow);
   if (remedies.length === 0) return null;
