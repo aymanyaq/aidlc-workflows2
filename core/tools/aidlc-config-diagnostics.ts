@@ -838,6 +838,27 @@ export function probeHarnessCli(
   };
 }
 
+function nonSkillFiles(files: readonly string[]): string[] {
+  return files.filter((file) => !file.replaceAll("\\", "/").includes("/skills/"));
+}
+
+/**
+ * Whether the project's selected projection routes any hook or agent through
+ * the `aidlc` command. A copy-channel projection runs everything through Bun, so
+ * the machine's native install is not on its execution path. With no installed
+ * harness the answer is `true`: nothing shows the command is unneeded.
+ */
+export function selectedProjectionRequiresAidlc(
+  projectDir: string,
+  harnessDirHint?: string,
+): boolean {
+  const selected = selectedHarness(projectDir, harnessDirHint);
+  if (!selected) return true;
+  return runtimeRequirements(
+    nonSkillFiles(runtimeCommandFiles(projectDir, selected.harnessDir)),
+  ).aidlc;
+}
+
 export function probeRuntime(
   projectDir: string,
   harnessDir: string,
@@ -848,11 +869,7 @@ export function probeRuntime(
   const baselinePath = deriveNonInteractivePath(options);
   const interactivePath = options.interactivePath ?? env.PATH ?? "";
   const commandFiles = runtimeCommandFiles(projectDir, harnessDir);
-  const requirements = runtimeRequirements(
-    commandFiles.filter((file) =>
-      !file.replaceAll("\\", "/").includes("/skills/")
-    ),
-  );
+  const requirements = runtimeRequirements(nonSkillFiles(commandFiles));
   return {
     baselinePath,
     commandFiles,
