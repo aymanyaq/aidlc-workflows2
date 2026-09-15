@@ -63,6 +63,7 @@ import { workspaceManifestChecks } from "./aidlc-workspace-doctor.ts";
 import {
   instructionFileDoctorCheck,
   runtimeDoctorChecks,
+  selectedProjectionRequiresAidlc,
   workspaceShellRefreshCommand,
 } from "./aidlc-config-diagnostics.ts";
 import {
@@ -2546,6 +2547,12 @@ export async function collectDoctorReport(
   const compiled = isCompiledExecutable();
 
   const installedVersion = activeVersion();
+  // The machine install only fails a project whose hooks call the aidlc
+  // command. A copy-channel projection run through Bun never does, so a broken
+  // native install is reported there without failing the project's doctor.
+  const machineSeverity = !compiled && !selectedProjectionRequiresAidlc(projectDir, harnessDir())
+    ? { severity: "warn" as const }
+    : {};
   if (compiled || installedVersion) {
     const installedState = installedVersion
       ? inspectInstalledVersion(installedVersion)
@@ -2554,6 +2561,7 @@ export async function collectDoctorReport(
     const runtimeReady = installedState.complete && distributions.length > 0;
     results.push({
       pass: installedVersion !== null && runtimeReady,
+      ...(installedVersion !== null && runtimeReady ? {} : machineSeverity),
       label: installedVersion && runtimeReady
         ? `Installed runtime: ${installedVersion} [${distributions.join(", ")}]`
         : installedVersion && installedState.complete
@@ -2580,6 +2588,7 @@ export async function collectDoctorReport(
     }
     results.push({
       pass: pointerValid,
+      ...(pointerValid ? {} : machineSeverity),
       label: pointerValid
         ? `Command pointer: ${command} -> ${installedVersion}`
         : installedVersion

@@ -30,6 +30,7 @@ import {
   reconcileProviderActions,
   runtimeDoctorChecks,
   runtimeIssues,
+  selectedProjectionRequiresAidlc,
   trustStatus,
   workspaceSiblingDoctorCheck,
   workspaceSiblingIssues,
@@ -212,6 +213,43 @@ describe("t294 config section dispatch", () => {
 });
 
 describe("t294 runtime diagnostics", () => {
+  test("a broken native install warns, not fails, a project whose hooks never call aidlc", async () => {
+    const copy = temp("aidlc-t294-pointer-copy-");
+    cpSync(join(DIST, "claude"), copy, { recursive: true });
+    const native = temp("aidlc-t294-pointer-native-");
+    cpSync(join(DIST_RELEASE, "claude"), native, { recursive: true });
+    expect(selectedProjectionRequiresAidlc(copy)).toBe(false);
+    expect(selectedProjectionRequiresAidlc(native)).toBe(true);
+    expect(selectedProjectionRequiresAidlc(temp("aidlc-t294-pointer-none-"))).toBe(true);
+
+    // An active version with no launcher: the state a removed ~/.local/bin/aidlc leaves.
+    const machine = temp("aidlc-t294-pointer-machine-");
+    writeFileSync(
+      join(machine, "active-executable"),
+      `${join(machine, "versions", "9.9.9", "aidlc")}\n`,
+    );
+    const saved = { root: process.env.AIDLC_INSTALL_ROOT, bin: process.env.AIDLC_BIN_DIR };
+    process.env.AIDLC_INSTALL_ROOT = machine;
+    process.env.AIDLC_BIN_DIR = join(machine, "bin");
+    try {
+      const pointer = async (project: string) =>
+        (await collectDoctorReport(project)).checks.find((check) =>
+          check.label.startsWith("Command pointer")
+        );
+      expect(await pointer(copy)).toEqual(
+        expect.objectContaining({ pass: false, severity: "warn" }),
+      );
+      const nativePointer = await pointer(native);
+      expect(nativePointer?.pass).toBe(false);
+      expect(nativePointer?.severity).toBeUndefined();
+    } finally {
+      if (saved.root === undefined) delete process.env.AIDLC_INSTALL_ROOT;
+      else process.env.AIDLC_INSTALL_ROOT = saved.root;
+      if (saved.bin === undefined) delete process.env.AIDLC_BIN_DIR;
+      else process.env.AIDLC_BIN_DIR = saved.bin;
+    }
+  }, 120_000);
+
   test("baseline, interactive-only, and absent PATH cases are hermetic", () => {
     const project = temp("aidlc-t294-runtime-probe-");
     const hooks = join(project, ".claude", "hooks");
