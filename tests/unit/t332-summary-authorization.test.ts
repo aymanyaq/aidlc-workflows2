@@ -407,6 +407,10 @@ describe("t332 summary authorization id", () => {
     expect(stale.fault).toContain("Write, Edit, or apply_patch");
     expect(stale.refusal?.fault).toBe(stale.fault);
     expect(stale.message).toContain("Write, Edit, or apply_patch");
+    // The remedy is the save; the confirmation already stands.
+    const remedy = stale.refusal?.remedies.find((r) => r.op === "reconfirm-summary");
+    expect(remedy?.action).toContain("Re-save every output document");
+    expect(remedy?.action).not.toContain("record the human's confirmation");
 
     // A reuse decision is recorded as a decision and changes nothing about
     // the write evidence.

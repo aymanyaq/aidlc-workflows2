@@ -21491,11 +21491,16 @@ export function evaluateGuardRefusal(
       input.attempt.summaryCoverage !== "current" &&
       input.attempt.reviewCoverage !== "current"
     ) {
+      // An unauthorized output is repaired by its save, not by another
+      // confirmation: re-confirming unchanged answers records the same one.
       remedies.push({
         op: "reconfirm-summary",
-        action:
-          "Present the current consolidated summary, record the human's " +
-          "confirmation, then regenerate or re-save the produced artifacts.",
+        action: input.code === "SUMMARY_ARTIFACT_UNAUTHORIZED"
+          ? "Re-save every output document of this stage through the native " +
+            "file-editing tool, then retry. The recorded confirmation still " +
+            "stands; ask for it again only if the summary itself changed."
+          : "Present the current consolidated summary, record the human's " +
+            "confirmation, then regenerate or re-save the produced artifacts.",
         requiresHuman: true,
         executableNow: openForWork,
       });
