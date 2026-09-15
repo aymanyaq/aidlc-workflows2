@@ -269,7 +269,23 @@ async function runCanonical(
   ]);
   const rawToolName = copilot.tool_name ?? copilot.toolName ?? "";
   const toolName = TOOL_ALIAS[rawToolName] ?? rawToolName;
-  const isApplyPatch = rawToolName === "apply_patch" || rawToolName === "applyPatch";
+  // The CLI delivers a PascalCase-registered event under the Claude-style name,
+  // so apply_patch can arrive as `Edit` carrying only the freeform envelope. It
+  // names no `file_path`, and keyed on the name alone it derives no target: the
+  // write reaches disk with no receipt. A path-less write whose input IS a patch
+  // envelope is parsed as one; the patch parser confines every target it finds.
+  const isPathlessPatchEnvelope = (): boolean => {
+    const fields = objectFields(nativeToolInput);
+    if (!fields) return false;
+    if (["path", "file_path", "filePath", "files", "filePaths", "replacements"].some((key) => fields[key] !== undefined)) {
+      return false;
+    }
+    return [fields.input, fields.patchText, fields.patch].some(
+      (value) => typeof value === "string" && /^\s*\*\*\* Begin Patch\b/.test(value),
+    );
+  };
+  const isApplyPatch = rawToolName === "apply_patch" || rawToolName === "applyPatch" ||
+    ((toolName === "Write" || toolName === "Edit") && isPathlessPatchEnvelope());
 
   // Re-serialize the payload with the canonical tool_name so verbatim pipes
   // (Bash → guards, rebuild-stage-graph) carry the name the core hooks match on.
