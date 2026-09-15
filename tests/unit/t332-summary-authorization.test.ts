@@ -3,7 +3,8 @@
 // function:summaryScopeForRecordPath, function:activeSummaryAuthorizationForRecordPath,
 // function:readSummaryAuthorization, function:writeSummaryAuthorization,
 // function:clearSummaryAuthorization, function:isSummaryAuthorizationId,
-// subcommand:aidlc-log:answer, hook:aidlc-write-audit-log
+// subcommand:aidlc-log:answer, subcommand:aidlc-state:reuse-artifact,
+// hook:aidlc-write-audit-log
 //
 // t332 - a summary confirmation authorizes the outputs generated from it, and
 // completion asks whether each output DESCENDS from the current authorization
@@ -67,6 +68,7 @@ import {
 
 const BUN = process.execPath;
 const LOG = join(AIDLC_SRC, "tools", "aidlc-log.ts");
+const STATE = join(AIDLC_SRC, "tools", "aidlc-state.ts");
 const STAGE = "requirements-analysis";
 const tempDirs: string[] = [];
 
@@ -96,6 +98,36 @@ function run(args: string[], proj: string) {
     stdout: result.stdout.toString(),
     stderr: result.stderr.toString(),
   };
+}
+
+function reuse(proj: string, decision: "keep" | "modify" | "redo" = "keep") {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD;
+  const result = Bun.spawnSync({
+    cmd: [
+      BUN,
+      STATE,
+      "reuse-artifact",
+      STAGE,
+      "--decision",
+      decision,
+      "--artifacts",
+      "requirements.md",
+      "--project-dir",
+      proj,
+    ],
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return {
+    status: result.exitCode,
+    output: `${result.stdout.toString()}${result.stderr.toString()}`,
+  };
+}
+
+function reuseRows(proj: string) {
+  return readAuditShardEvents(proj).filter((entry) => entry.event === "ARTIFACT_REUSED");
 }
 
 function paths(proj: string) {
@@ -355,6 +387,34 @@ describe("t332 summary authorization id", () => {
     if (before.ok) throw new Error("expected refusal");
     expect(before.refusal?.code).toBe("SUMMARY_ARTIFACT_UNAUTHORIZED");
     expect(before.message).toContain("was last saved before the confirmed answers");
+    writeArtifact(proj, artifact, "# generated from the confirmation\n");
+    expect(evidence(proj).ok).toBe(true);
+  });
+
+  test("an unauthorized output names itself and the receipt channel; a reuse decision repairs nothing, a save does", () => {
+    const proj = project();
+    const { artifact, questions } = paths(proj);
+    // The observed loop's state: the output exists, the confirmation exists,
+    // and the output predates it.
+    writeArtifact(proj, artifact, "# before\n");
+    confirm(proj, questions);
+    const stale = evidence(proj);
+    if (stale.ok) throw new Error("expected refusal");
+    // `fault` is the part a recovery ask quotes: which record, how it fell
+    // short, and which tools record the write this check reads.
+    expect(stale.fault).toContain("requirements.md");
+    expect(stale.fault).toContain("was last saved before the confirmed answers");
+    expect(stale.fault).toContain("Write, Edit, or apply_patch");
+    expect(stale.refusal?.fault).toBe(stale.fault);
+    expect(stale.message).toContain("Write, Edit, or apply_patch");
+
+    // A reuse decision is recorded as a decision and changes nothing about
+    // the write evidence.
+    expect(reuse(proj).status).toBe(0);
+    expect(reuseRows(proj)).toHaveLength(1);
+    expect(evidence(proj).ok).toBe(false);
+
+    // Saving the document through the receipted channel is the repair.
     writeArtifact(proj, artifact, "# generated from the confirmation\n");
     expect(evidence(proj).ok).toBe(true);
   });
