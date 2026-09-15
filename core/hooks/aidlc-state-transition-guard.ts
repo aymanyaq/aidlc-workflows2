@@ -3,7 +3,8 @@
 // The orchestration engine owns stage pinning, evidence checks, idempotency,
 // and transition selection. A conductor that calls state transition verbs
 // directly bypasses that boundary. Read-only state queries and specialized
-// recovery/configuration verbs remain available.
+// recovery/configuration verbs remain available. A shell call that sets one of
+// the engine's guard off-switches on its own command line is refused as well.
 
 import {
   type ClaudeCodeHookInput,
@@ -848,6 +849,28 @@ function variableReference(word: string): string | null {
     null;
 }
 
+// Off-switches for the checks that tie a record to the human's answer. The
+// engine honours them from its own process environment, so an agent that
+// prefixes its command with one skips the check and the audit shows nothing.
+export const AGENT_REFUSED_BYPASSES = new Set([
+  "AIDLC_SKIP_HUMAN_PRESENCE_GUARD",
+  "AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD",
+  "AIDLC_DISABLE_SUMMARY_CONFIRMATION",
+]);
+
+// The first refused bypass assigned ahead of a command, or after env/export.
+// Text passed to echo, rg, or a heredoc is not an assignment.
+export function inlineGuardBypass(command: string): string | null {
+  for (const segment of shellCommandSegments(maskHeredocBodies(command))) {
+    for (const word of shellWords(segment)) {
+      const name = assignment(word)?.name;
+      if (name === undefined && word !== "env" && word !== "export") break;
+      if (name !== undefined && AGENT_REFUSED_BYPASSES.has(name)) return name;
+    }
+  }
+  return null;
+}
+
 function delegatedLifecycleCommandAtDepth(command: string, depth: number): string | null {
   if (depth > 8) return "nested shell command beyond guard inspection limit";
   const heredocBodies = heredocSubstitutionBodies(command);
@@ -989,6 +1012,16 @@ export async function run(input: string): Promise<number> {
     return 0;
   }
   if (parsed.tool_name !== "Bash") return 0;
+  const bypass = inlineGuardBypass(parsed.tool_input?.command ?? "");
+  if (bypass !== null) {
+    process.stderr.write(
+      `${bypass} cannot be set on an agent's command: it switches off the check that ties ` +
+        "the record to the human's answer, and leaves nothing in the audit. Run the command " +
+        "without it and resolve the refusal that check reports. Only a person turns a guard " +
+        "off, in the environment that launches the CLI.\n",
+    );
+    return 2;
+  }
   const verb = directStateTransition(parsed.tool_input?.command ?? "");
   if (verb !== null) {
     process.stderr.write(
