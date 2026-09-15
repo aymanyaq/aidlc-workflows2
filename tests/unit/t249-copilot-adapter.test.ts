@@ -505,6 +505,31 @@ describe("t249 Copilot hook adapter (live-captured payload fixtures)", () => {
     expect(parsed.hookSpecificOutput?.permissionDecisionReason?.length ?? 0).toBeGreaterThan(0);
   });
 
+  test("4-bypass: a guard off-switch on the agent's own command is denied", () => {
+    const dir = scratchProject(true);
+    const payload = withCwd(
+      {
+        ...FIXTURES.preToolUse_bash,
+        tool_input: {
+          command:
+            "AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD=1 AIDLC_SKIP_HUMAN_PRESENCE_GUARD=1 " +
+            "./.aidlc/aidlc engine log answer --stage approval-handoff " +
+            "--checkpoint summary-confirmation",
+        },
+      },
+      dir,
+    );
+    const r = runAdapter(dir, "guard-tool-call", payload);
+    expect(r.code).toBe(0);
+    const parsed = JSON.parse(r.stdout) as {
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
+    };
+    expect(parsed.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput?.permissionDecisionReason).toContain(
+      "AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD cannot be set on an agent's command",
+    );
+  });
+
   test("4a: ask_user is denied while workflow state is active", () => {
     const dir = scratchProject(true);
     const r = runAdapter(dir, "guard-tool-call", {
