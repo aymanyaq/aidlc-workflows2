@@ -17,6 +17,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -266,6 +267,48 @@ function artifactWrites(proj: string) {
 }
 
 describe("t332 summary authorization id", () => {
+  test.each(["patch", "native-edit", "json-arguments"])("Copilot %s re-save repairs write evidence under the current confirmation", (form) => {
+    const proj = project();
+    const { questions, artifact } = paths(proj);
+    const id = confirm(proj, questions);
+    const questionBytes = readFileSync(questions, "utf-8");
+    const repo = join(import.meta.dir, "..", "..");
+    cpSync(join(repo, "dist", "copilot", ".aidlc"), join(proj, ".aidlc"), { recursive: true });
+    cpSync(join(repo, "harness", "copilot", "hooks", "aidlc-copilot-adapter.ts"),
+      join(proj, ".aidlc", "hooks", "aidlc-copilot-adapter.ts"));
+    writeFileSync(artifact, "# Prior output without a write receipt\n");
+    expect(evidence(proj).ok).toBe(false);
+
+    const toolName = form === "patch" ? "apply_patch" : "insertEditIntoFile";
+    const toolArgs = form === "patch"
+      ? `*** Begin Patch\n*** Update File: ${artifact}\n@@\n-old\n+new\n*** End Patch\n`
+      : form === "json-arguments" ? JSON.stringify({ filePath: artifact, code: "new" })
+      : { filePath: artifact, code: "new" };
+    const post = (resultType: string) => {
+      const result = Bun.spawnSync({
+        cmd: [BUN, join(proj, ".aidlc", "hooks", "aidlc-copilot-adapter.ts"), "post-tool"],
+        cwd: proj,
+        env: { ...process.env, AIDLC_PROJECT_DIR: proj, CLAUDE_PROJECT_DIR: proj, AIDLC_COMPILED_EXECUTABLE: undefined },
+        stdin: Buffer.from(JSON.stringify({ cwd: proj, sessionId: "copilot-recovery", toolName, toolArgs,
+          toolResult: { resultType, textResultForLlm: resultType === "success" ? "Modified 1 file" : "Patch context did not match" },
+        })),
+        stdout: "pipe", stderr: "pipe",
+      });
+      expect(result.exitCode, result.stderr.toString()).toBe(0);
+    };
+    post("failure");
+    expect(artifactWrites(proj)).toHaveLength(0);
+    expect(evidence(proj).ok).toBe(false);
+
+    // Simulate the host's successful edit before delivering PostToolUse.
+    writeFileSync(artifact, "# Requirements\nKeep the login flow.\n");
+    post("success");
+    const [write] = artifactWrites(proj);
+    expect(auditBlockField(write.block, SUMMARY_AUTHORIZATION_FIELD)).toBe(id as string);
+    expect(evidence(proj).ok).toBe(true);
+    expect(readFileSync(questions, "utf-8")).toBe(questionBytes);
+  });
+
   test("Looks correct mints an id, records it on the receipt, and makes it the active authorization", () => {
     const proj = project();
     const { questions } = paths(proj);

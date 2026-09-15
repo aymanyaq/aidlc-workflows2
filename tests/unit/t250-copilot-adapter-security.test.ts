@@ -444,6 +444,97 @@ describe("t250 Copilot adapter security (fail-open + path confinement)", () => {
     }
   });
 
+  test("CLI batched patch calls reach every pre-write guard", () => {
+    const s = scratch();
+    try {
+      const result = runAdapter(s, "guard-tool-call", {
+        sessionId: "batch-session",
+        cwd: s.projectRoot,
+        toolCalls: [
+          { id: "patch-1", name: "apply_patch", args: "*** Begin Patch\n*** Add File: one.md\n+one\n*** End Patch\n" },
+          { id: "edit-2", name: "insertEditIntoFile", args: { filePath: "two.md", code: "two" } },
+        ],
+      });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe("");
+      for (const hook of ["aidlc-reviewer-scope.ts", "aidlc-review-freeze.ts", "aidlc-plan-approval-guard.ts"]) {
+        expect(capturedInputs(s.captureDir, hook).map((entry) =>
+          (entry.tool_input as { file_path: string }).file_path
+        )).toEqual([join(s.projectRoot, "one.md"), join(s.projectRoot, "two.md")]);
+      }
+    } finally { s.cleanup(); }
+  });
+
+  test("a denied batched edit emits one Copilot deny response", () => {
+    const s = scratch();
+    try {
+      writeFileSync(join(s.hooksDir, "aidlc-review-freeze.ts"), stubHookBody("aidlc-review-freeze.ts", 2, "Current review freezes this artifact"));
+      const result = runAdapter(s, "guard-tool-call", {
+        cwd: s.projectRoot,
+        toolCalls: [
+          { id: "read", name: "view", args: { path: "one.md" } },
+          { id: "edit", name: "str_replace_editor", args: { path: "two.md", command: "str_replace" } },
+        ],
+      });
+      expect(result.code).toBe(0);
+      const output = JSON.parse(result.stdout).hookSpecificOutput;
+      expect(output.permissionDecision).toBe("deny");
+      expect(output.permissionDecisionReason).toContain("freezes this artifact");
+    } finally { s.cleanup(); }
+  });
+
+  test("a singleton CLI batch forwards its rewritten command and call id", () => {
+    const s = scratch();
+    try {
+      const result = runAdapter(s, "guard-tool-call", {
+        cwd: s.projectRoot, sessionId: "batch-session",
+        toolCalls: [{ id: "command-id", name: "bash", args: { command: "aidlc engine orchestrate next" } }],
+      });
+      expect(result.code).toBe(0);
+      expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput.command).toContain("--aidlc-attempt-id");
+    } finally { s.cleanup(); }
+  });
+
+  test("a multi-call command rewrite is denied before claiming coordination state", () => {
+    const s = scratch();
+    try {
+      const lib = join(s.projectRoot, ".aidlc", "tools", "aidlc-lib.ts");
+      writeFileSync(lib, readFileSync(lib, "utf-8").replace(
+        'return { allowed: true, attemptId: "00000000-0000-4000-8000-000000000001" };',
+        'throw new Error("CLAIM MUST NOT RUN");',
+      ));
+      const result = runAdapter(s, "guard-tool-call", {
+        cwd: s.projectRoot, sessionId: "batch-session",
+        toolCalls: [
+          { id: "command-id", name: "bash", args: { command: "aidlc engine orchestrate next" } },
+          { id: "read-id", name: "view", args: { path: "one.md" } },
+        ],
+      });
+      const output = JSON.parse(result.stdout).hookSpecificOutput;
+      expect(output.permissionDecision).toBe("deny");
+      expect(output.permissionDecisionReason).toContain("separately");
+      expect(result.stderr).not.toContain("CLAIM MUST NOT RUN");
+    } finally { s.cleanup(); }
+  });
+
+  test.each([
+    { tool_result: { result_type: "failure" } },
+    { toolResult: { resultType: "error" } },
+    { tool_response: { success: false } },
+    { toolResponse: { tool_success: false } },
+  ])("failed tool results do not reach audit or sensors: %j", (failure) => {
+    const s = scratch();
+    try {
+      writeFileSync(join(s.projectRoot, "old.md"), "old content");
+      const result = runAdapter(s, "post-tool", {
+        cwd: s.projectRoot, tool_name: "Edit", tool_input: { path: "old.md" }, ...failure,
+      });
+      expect(result.code).toBe(0);
+      expect(reached(s.captureDir, "aidlc-write-audit-log.ts")).toBe(0);
+      expect(reached(s.captureDir, "aidlc-run-sensors.ts")).toBe(0);
+    } finally { s.cleanup(); }
+  });
+
   test("5: an unknown target allows without dispatch (switch default)", () => {
     const s = scratch();
     try {
