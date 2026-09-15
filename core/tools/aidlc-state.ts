@@ -3739,6 +3739,7 @@ function verifySummaryConfirmationPrecondition(
       evidence.refusal?.invariant ??
       "Generated outputs descend from a current human-backed summary confirmation.",
     userMessage: evidence.message,
+    ...(evidence.fault ? { fault: evidence.fault } : {}),
     summaryCoverage: evidence.summaryCoverage,
   });
 }
@@ -3799,6 +3800,7 @@ function refuseStateGuard(
     blockedAction: string;
     invariant: string;
     userMessage: string;
+    fault?: string;
     unit?: string;
     receipts?: ReturnType<typeof freshReviewReceipts>;
     summaryCoverage?: "current" | "stale" | "missing";
@@ -3824,6 +3826,7 @@ function refuseStateGuard(
     stateContent: content,
     invariant: input.invariant,
     userMessage: input.userMessage,
+    ...(input.fault ? { fault: input.fault } : {}),
     attempt: snapshot.attempt,
     humanAuthority: humanAuthorityState(pd),
     ...(teamGate ? { teamGate } : {}),
@@ -5180,6 +5183,7 @@ function verifyTeamUnitGateEvidence(
         invariant:
           "Generated Unit outputs descend from current human-backed summary confirmation.",
         userMessage: summary.message,
+        ...(summary.fault ? { fault: summary.fault } : {}),
         unit: context.unit,
         summaryCoverage: summary.summaryCoverage,
       });

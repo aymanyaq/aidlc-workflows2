@@ -9691,6 +9691,8 @@ export type SummaryConfirmationEvidence =
       ok: false;
       message: string;
       summaryCoverage: "stale" | "missing";
+      /** The record at fault and how it fell short, when one output decides the refusal. */
+      fault?: string;
       refusal?: GuardRefusal;
       /** As above; a mutating caller resolves the setting again to raise an invalid memory value as its own error. */
       changeControlRead?: true;
@@ -10154,15 +10156,18 @@ export function checkSummaryConfirmationEvidence(
     code: string,
     message: string,
     summaryCoverage: "stale" | "missing",
+    fault?: string,
   ): SummaryConfirmationEvidence => {
     const read = changeControlRead ? { changeControlRead: true as const } : {};
+    const faulted = fault ? { fault } : {};
     if (options.stateContent === undefined || options.stateContent === null) {
-      return { ok: false, message, summaryCoverage, ...read };
+      return { ok: false, message, summaryCoverage, ...faulted, ...read };
     }
     return {
       ok: false,
       message,
       summaryCoverage,
+      ...faulted,
       refusal: evaluateGuardRefusal({
         code,
         blockedAction: "summary-confirmation",
@@ -10173,6 +10178,7 @@ export function checkSummaryConfirmationEvidence(
         invariant:
           "Generated outputs descend from a current human-backed summary confirmation.",
         userMessage: message,
+        ...faulted,
         attempt: {
           recovery: "available",
           summaryCoverage,
@@ -10684,18 +10690,26 @@ export function checkSummaryConfirmationEvidence(
           const stampedElsewhere = unauthorized.some(
             (entry) => auditBlockField(entry.block, SUMMARY_AUTHORIZATION_FIELD) !== null,
           );
+          const shortfall = `output document ${artifact} ${
+            newestWrites.length === 0
+              ? "has no recorded write"
+              : stampedElsewhere
+                ? "was last saved under a different summary confirmation"
+                : "was last saved before the confirmed answers"
+          }`;
+          // Only the harness's file-editing tools reach the write-audit feed;
+          // a shell write or a reuse decision leaves this refusal exactly as it
+          // is, which is how a conductor loops on it.
+          const receiptChannel =
+            "Only a save through the harness's native file-editing tool " +
+            "(Write, Edit, or apply_patch) records the write this check reads.";
           return failure(
             "SUMMARY_ARTIFACT_UNAUTHORIZED",
-            `Refusing to continue "${stage.slug}": this stage's output document ` +
-              `${artifact} ${
-                newestWrites.length === 0
-                  ? "has no recorded write"
-                  : stampedElsewhere
-                    ? "was last saved under a different summary confirmation"
-                    : "was last saved before the confirmed answers"
-              }. Save the document again, so its write descends from the current ` +
-              "confirmation, then continue.",
+            `Refusing to continue "${stage.slug}": this stage's ${shortfall}. ` +
+              "Save the document again, so its write descends from the current " +
+              `confirmation, then continue. ${receiptChannel}`,
             "stale",
+            `This stage's ${shortfall}. ${receiptChannel}`,
           );
         }
         continue;
@@ -23267,6 +23281,12 @@ export interface GuardRefusal {
   state: GuardLifecycleState;
   invariant: string;
   userMessage: string;
+  // The record at fault and how it fell short, as a statement with no advice
+  // in it. `userMessage` is written for the enforcing tool and may name
+  // commands the curated `remedies` deliberately withhold; `fault` is the part
+  // a recovery ask may quote, because it says WHICH record without saying
+  // what to run. Absent when no single record decides the refusal.
+  fault?: string;
   remedies: GuardRemedy[];
 }
 
@@ -23327,6 +23347,7 @@ export interface GuardRefusalInput {
   stateContent: string;
   invariant: string;
   userMessage: string;
+  fault?: string;
   attempt: GuardAttemptState;
   humanAuthority: GuardHumanAuthorityState;
   teamGate?: TeamUnitGateResolution;
@@ -23868,6 +23889,7 @@ export function evaluateGuardRefusal(
     state,
     invariant: input.invariant,
     userMessage: input.userMessage,
+    ...(input.fault ? { fault: input.fault } : {}),
     remedies: remedies.map((remedy) => ({ ...remedy, interaction: remedyInteraction(remedy) })),
   };
 }
@@ -24309,21 +24331,20 @@ export function recordGuardRefusal(
   return streak;
 }
 
-// The recovery ask's question: what is refused, WHY in the guard's own words,
-// then the instruction. The refusal sentence is the only half that names the
-// record at fault and how it fell short — which output document was never
-// written under the current confirmation, which review is outstanding. Without
-// it the conductor reads a reason code and a remedy phrased for every refusal
-// that shares it, so it repairs whichever record it guesses, is refused
-// identically, and asks again. The terminal ask has always carried this
-// sentence; the ask that still HAS a way out is the one that needs it.
+// The recovery ask's question: what is refused, the record at fault when one
+// decides it, then the instruction. The ask's remedies are the only advice it
+// gives — the tool's `userMessage` can name commands the evaluator withheld
+// because they would refuse too — so the ask quotes `fault`, which says WHICH
+// record and how it fell short and nothing about what to run. Without it a
+// conductor holding a remedy phrased for every refusal of that code repairs
+// whichever record it guesses, is refused identically, and asks again.
 function guardRecoveryQuestion(
   refusal: GuardRefusal,
   situation: string,
 ): string {
-  const why = refusal.userMessage.trim();
+  const fault = refusal.fault?.trim() ?? "";
   return (
-    `${situation}${why.length > 0 ? ` ${why}` : ""} Choose one ` +
+    `${situation}${fault.length > 0 ? ` ${fault}` : ""} Choose one ` +
     "authority-preserving recovery action."
   );
 }
