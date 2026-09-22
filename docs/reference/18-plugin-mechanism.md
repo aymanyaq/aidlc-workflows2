@@ -460,9 +460,15 @@ OpenCode, compose also emits a native `.opencode/agents/` twin with
 frontmatter. On Kiro, compose removes the unsupported `disallowedTools: Task`
 line from the `.kiro/agents/` persona while Kiro's native agent tool
 configuration keeps nested delegation unavailable; a different
-`disallowedTools` value is drop-logged and the persona is not copied. Re-compose
-also migrates an existing persona only when it is an exact, unchanged,
-same-plugin copy from the pre-projection composer; edited or foreign files retain
+`disallowedTools` value is drop-logged and the persona is not copied. On Kiro
+IDE, compose also appends the `tools:` and `permissions:` grant that the
+installed core delegate personas carry — the most common grant among them, so
+it has the install's own command shape (`bun .kiro/tools/aidlc-*` in a source
+tree, the native command in a release) and a plugin persona never receives more
+than a core one. A persona that already declares `tools:` or `permissions:`
+keeps its own. Re-compose also migrates an existing persona only when it is an
+exact, unchanged, same-plugin copy of the source or, on Kiro IDE, of the
+grant-less projection an earlier composer wrote; edited or foreign files retain
 no-clobber behavior. An already-composed unsupported value is left in place with
 a degraded diagnostic that names the file to remove before re-compose.
 
@@ -481,14 +487,20 @@ supports; a `reviewer:` on any gated stage regardless of mode) names an agent
 without the complete installed dispatch surface, and records the stage, agent,
 and remediation in the compose drops log. On Kiro CLI, the JSON and
 `trustedAgents` registration are checked independently: having only one still
-rejects the stage. On Kiro IDE, author the installed `.md` with both required
-blocks or change the stage to `mode: inline`; the IDE path never reads
-`aidlc.json`. On OpenCode — the one harness whose native surface compose itself emits
-— a plugin-shipped persona counts as the surface when it would survive the
-native-twin emission (closed frontmatter, no un-projectable
-`disallowedTools`); Kiro/Codex surfaces are always hand-authored, so a
-plugin's own files never satisfy those checks. Hand-authoring the missing
-surface and re-running compose accepts the stage. The Markdown persona remains
+rejects the stage. The IDE path never reads `aidlc.json`. On OpenCode and Kiro
+IDE — the harnesses whose native surface compose itself emits — a
+plugin-shipped persona counts as the surface when the copy compose is about to
+make would be dispatchable: on OpenCode, when it survives the native-twin
+emission (closed frontmatter, no un-projectable `disallowedTools`); on Kiro IDE,
+when its projection carries a complete grant and the copy would land (no
+installed file, or an unchanged same-plugin copy the migration rewrites). The
+check runs before compose copies any agent, so a first compose accepts the
+stage. Kiro CLI and Codex surfaces are always hand-authored, so a plugin's own
+files never satisfy those checks. Where no surface is emitted — a persona the
+plugin does not ship, a hand-edited installed copy, or an install with no
+dispatchable core persona to copy a grant from — author the missing surface
+(on Kiro IDE, the installed `.md` with both required blocks) and re-run compose,
+or change the stage to `mode: inline`. The Markdown persona remains
 composed for any accepted inline stage that also uses it.
 
 `agent-team` is schema-reserved but has no runtime consumer, so compose rejects

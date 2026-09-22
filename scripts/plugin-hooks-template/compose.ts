@@ -67,6 +67,7 @@ const HARNESS_NAME = (() => {
 })();
 const IS_COPILOT = HARNESS_NAME === "copilot";
 const IS_OPENCODE = HARNESS_NAME === "opencode";
+const IS_KIRO_IDE = HARNESS_NAME === "kiro-ide";
 const STAGES_DIR = join(HARNESS_DIR, "aidlc-common", "stages");
 const SKILLS_DIR = IS_COPILOT
   ? join(PROJECT_DIR, ".github", "skills")
@@ -810,7 +811,7 @@ function disallowedToolsValues(content: string): string[] {
   ].map((match) => match[1].trim());
 }
 
-function projectKiroNativeAgent({ file, content }: CopyContext): string {
+function stripKiroDisallowedTools({ file, content }: CopyContext): string {
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
   if (!m) throw new Error(`${file}: plugin agent has no closed frontmatter block`);
   const disallowed = disallowedToolsValues(content);
@@ -825,6 +826,72 @@ function projectKiroNativeAgent({ file, content }: CopyContext): string {
     .filter((line) => !/^disallowedTools:/.test(line))
     .join("\n");
   return content.replace(m[0], () => `---\n${fm}\n---\n`);
+}
+
+// A top-level frontmatter key with its indented continuation lines.
+function topLevelFrontmatterBlock(lines: string[], key: string): string[] | null {
+  const start = lines.findIndex((line) => line.startsWith(`${key}:`));
+  if (start < 0) return null;
+  const next = lines.findIndex(
+    (line, index) => index > start && /^[A-Za-z_][\w.-]*\s*:/.test(line),
+  );
+  return lines.slice(start, next < 0 ? lines.length : next);
+}
+
+// The tools/permissions grant the installed core personas carry. Core ships
+// one grant for every delegated persona (the composer adds scope paths), so the
+// most common one is the delegate grant, and it already has the install's
+// command shape (the source tree's script runner or the release's native
+// command). A plugin persona receives exactly that grant and never more.
+let coreKiroIdeGrantCache: string[] | null | undefined;
+function coreKiroIdeDispatchGrant(): string[] | null {
+  if (coreKiroIdeGrantCache !== undefined) return coreKiroIdeGrantCache;
+  const counts = new Map<string, { lines: string[]; count: number }>();
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(join(HARNESS_DIR, "agents")).sort();
+  } catch {
+    // No roster means no grant to copy; the stage stays rejected.
+  }
+  for (const entry of entries) {
+    if (!/^aidlc-.+-agent\.md$/.test(entry)) continue;
+    let content = "";
+    try {
+      content = readFileSync(join(HARNESS_DIR, "agents", entry), "utf-8");
+    } catch {
+      continue;
+    }
+    if (frontmatterScalar(content, "plugin") || !ideAgentContentIsDispatchable(content)) continue;
+    const lines = frontmatter(content).split(/\r?\n/);
+    const tools = topLevelFrontmatterBlock(lines, "tools");
+    const permissions = topLevelFrontmatterBlock(lines, "permissions");
+    if (!tools || !permissions) continue;
+    const grant = [...tools, ...permissions];
+    const key = grant.join("\n");
+    const seen = counts.get(key);
+    if (seen) seen.count++;
+    else counts.set(key, { lines: grant, count: 1 });
+  }
+  let best: { lines: string[]; count: number } | undefined;
+  for (const candidate of counts.values()) {
+    if (!best || candidate.count > best.count) best = candidate;
+  }
+  coreKiroIdeGrantCache = best?.lines ?? null;
+  return coreKiroIdeGrantCache;
+}
+
+// Kiro IDE dispatches the installed persona Markdown itself, so a plugin
+// persona is projected with the core delegate grant unless its author already
+// declared a tools/permissions surface. Kiro CLI dispatches through agent-v1
+// JSON and conductor trust instead, and never reads this frontmatter.
+function projectKiroNativeAgent(ctx: CopyContext): string {
+  const stripped = stripKiroDisallowedTools(ctx);
+  if (!IS_KIRO_IDE) return stripped;
+  const m = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
+  if (!m || /^(tools|permissions):/m.test(m[1])) return stripped;
+  const grant = coreKiroIdeDispatchGrant();
+  if (!grant) return stripped;
+  return stripped.replace(m[0], () => `---\n${[m[1], ...grant].join("\n")}\n---\n`);
 }
 
 function kiroNativeAgentPrecheck(): CopyPrecheck {
@@ -858,17 +925,43 @@ function migrateExistingKiroAgent(
   if (!ctx.file.endsWith(".md")) return "compare";
   const installed = ctx.installed.toString("utf-8");
   // This migration is deliberately narrower than ordinary plugin upgrades:
-  // only an unchanged pre-projection copy owned by this plugin is rewritten.
-  // User edits, core files, and another plugin's files stay under no-clobber.
+  // only an unchanged earlier copy of this plugin's own persona is rewritten -
+  // the unprojected source, or on Kiro IDE the grant-less projection an earlier
+  // composer wrote. User edits, core files, and another plugin's files stay
+  // under no-clobber.
   if (
-    installed !== ctx.content ||
     frontmatterScalar(ctx.content, "plugin") !== PLUGIN_NAME ||
     frontmatterScalar(installed, "plugin") !== PLUGIN_NAME
   ) {
     return "compare";
   }
+  if (installed !== ctx.content) {
+    if (!IS_KIRO_IDE) return "compare";
+    let stripped: string;
+    let projected: string;
+    try {
+      stripped = stripKiroDisallowedTools(ctx);
+      projected = projectKiroNativeAgent(ctx);
+    } catch {
+      return "compare";
+    }
+    if (installed !== stripped || projected === stripped) return "compare";
+    writeComposeFile(ctx.dest, projected);
+    return "written";
+  }
   const disallowed = disallowedToolsValues(ctx.content);
-  if (disallowed.length === 0) return "compare";
+  if (disallowed.length === 0) {
+    if (!IS_KIRO_IDE) return "compare";
+    let projected: string;
+    try {
+      projected = projectKiroNativeAgent(ctx);
+    } catch {
+      return "compare";
+    }
+    if (projected === installed) return "compare";
+    writeComposeFile(ctx.dest, projected);
+    return "written";
+  }
   if (disallowed.length > 1) {
     const installedRel = relative(PROJECT_DIR, ctx.dest).replace(/\\/g, "/");
     recordDrop(
@@ -1187,6 +1280,48 @@ function installedIdeAgentIsDispatchable(agentsDir: string, agent: string): bool
   } catch {
     return false;
   }
+  return ideAgentContentIsDispatchable(content);
+}
+
+// The dispatch prechecks run before this compose copies any agent, so a
+// persona the plugin ships would otherwise be judged by its absence. Answer
+// for the file the agent copy below will leave behind: a fresh projection, or
+// the in-place migration of an unchanged earlier copy of the same persona.
+function pluginShipsDispatchableKiroIdeAgent(agent: string): boolean {
+  let content = "";
+  try {
+    content = readFileSync(join(PLUGIN_ROOT, "agents", `${agent}.md`), "utf-8")
+      .replaceAll("{{HARNESS_DIR}}", HARNESS_LEAF);
+  } catch {
+    return false;
+  }
+  const ctx = { file: `${agent}.md`, rel: `${agent}.md`, content };
+  let stripped: string;
+  let projected: string;
+  try {
+    stripped = stripKiroDisallowedTools(ctx);
+    projected = projectKiroNativeAgent(ctx);
+  } catch {
+    return false;
+  }
+  if (!ideAgentContentIsDispatchable(projected)) return false;
+  const agentsDir = join(HARNESS_DIR, "agents");
+  const dest = join(agentsDir, `${agent}.md`);
+  if (existsSync(dest)) {
+    const installed = readFileSync(dest, "utf-8");
+    return installed === projected || (
+      frontmatterScalar(content, "plugin") === PLUGIN_NAME &&
+      frontmatterScalar(installed, "plugin") === PLUGIN_NAME &&
+      (installed === content || installed === stripped)
+    );
+  }
+  const name = frontmatterName(content);
+  if (!name) return true;
+  const colliding = installedNameRoster(agentsDir).get(name);
+  return !colliding || colliding === dest;
+}
+
+function ideAgentContentIsDispatchable(content: string): boolean {
   const fm = frontmatter(content);
   if (!fm) return false;
   const lines = fm.split(/\r?\n/);
@@ -1253,7 +1388,7 @@ async function kiroPluginAgentPrechecks(): Promise<KiroPluginAgentPrechecks | nu
   ) {
     return null;
   }
-  const isKiroIde = HARNESS_NAME === "kiro-ide";
+  const isKiroIde = IS_KIRO_IDE;
   const isKiroCli = HARNESS_LEAF === ".kiro" && !isKiroIde;
   const surfaceExt = isKiroIde
     ? ".md"
@@ -1405,7 +1540,8 @@ async function kiroPluginAgentPrechecks(): Promise<KiroPluginAgentPrechecks | nu
       const gap = {
         agent,
         missingSurface: isKiroIde
-          ? !installedIdeAgentIsDispatchable(surfaceDir, agent)
+          ? !installedIdeAgentIsDispatchable(surfaceDir, agent) &&
+            !pluginShipsDispatchableKiroIdeAgent(agent)
           : !existsSync(join(surfaceDir, `${agent}${surfaceExt}`)) &&
             !(HARNESS_LEAF === ".aidlc" && pluginShipsViableNativeAgent(agent)),
         missingTrust: isKiroCli && !trustedAgents.has(agent),
