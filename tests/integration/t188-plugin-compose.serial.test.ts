@@ -2447,6 +2447,135 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
     }
   });
 
+  // Kiro IDE reads the installed persona Markdown as the dispatch surface, so a
+  // persona the plugin ships must arrive carrying the grant core personas carry.
+  function kiroIdeGrant(content: string): string {
+    const fm = content.match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+    const start = fm.indexOf("\ntools:");
+    return start < 0 ? "" : fm.slice(start + 1);
+  }
+
+  function kiroIdeShippedPersonaPlugin(plugin: string): Record<string, string> {
+    const agent = `${plugin}-agent`;
+    const stageHead = (slug: string) => [
+      "---",
+      `slug: ${slug}`,
+      `plugin: ${plugin}`,
+      "phase: inception",
+      "execution: ALWAYS",
+      "condition: always",
+    ];
+    const stageTail = (title: string) => [
+      "consumes: []",
+      "requires_stage: []",
+      "inputs: x",
+      "outputs: y",
+      "---",
+      "",
+      `# ${title}`,
+      "",
+      "## Steps",
+      "body",
+      "",
+    ];
+    return {
+      [`stages/inception/${plugin}-led.md`]: [
+        ...stageHead(`${plugin}-led`),
+        `lead_agent: ${agent}`,
+        "support_agents: []",
+        "mode: subagent",
+        "produces: []",
+        ...stageTail("Led by the shipped persona"),
+      ].join("\n"),
+      [`stages/inception/${plugin}-reviewed.md`]: [
+        ...stageHead(`${plugin}-reviewed`),
+        "lead_agent: aidlc-product-agent",
+        "support_agents: []",
+        `reviewer: ${agent}`,
+        "review_artifact: reviewed-output",
+        "mode: inline",
+        "produces:",
+        "  - reviewed-output",
+        ...stageTail("Reviewed by the shipped persona"),
+      ].join("\n"),
+      [`agents/${agent}.md`]: [
+        "---",
+        `name: ${agent}`,
+        `display_name: ${plugin}`,
+        `plugin: ${plugin}`,
+        "description: synthetic shipped persona",
+        "disallowedTools: Task",
+        "---",
+        "",
+        `# ${plugin}`,
+        "",
+      ].join("\n"),
+    };
+  }
+
+  test("Kiro IDE composes stages dispatching a plugin-shipped persona on the first compose", () => {
+    const plugin = "syn-kiro-ide-shipped";
+    const agent = `${plugin}-agent`;
+    const { drops, proj } = composeSynthetic(
+      plugin,
+      kiroIdeShippedPersonaPlugin(plugin),
+      "kiro-ide",
+    );
+    const stagesDir = join(proj, ".kiro", "aidlc-common", "stages", "inception");
+    expect(existsSync(join(stagesDir, `${plugin}-led.md`))).toBe(true);
+    expect(existsSync(join(stagesDir, `${plugin}-reviewed.md`))).toBe(true);
+    expect(drops).not.toContain(`agent "${agent}"`);
+
+    const persona = readFileSync(join(proj, ".kiro", "agents", `${agent}.md`), "utf-8");
+    const core = readFileSync(join(proj, ".kiro", "agents", "aidlc-product-agent.md"), "utf-8");
+    expect(persona).not.toContain("disallowedTools");
+    expect(kiroIdeGrant(core)).not.toBe("");
+    expect(kiroIdeGrant(persona)).toBe(kiroIdeGrant(core));
+  });
+
+  test("Kiro IDE upgrades a grant-less persona an earlier compose left behind", () => {
+    const plugin = "syn-kiro-ide-upgrade";
+    const agent = `${plugin}-agent`;
+    const files = kiroIdeShippedPersonaPlugin(plugin);
+    const earlier = files[`agents/${agent}.md`].replace("disallowedTools: Task\n", "");
+    const { drops, proj } = composeSynthetic(
+      plugin,
+      files,
+      "kiro-ide",
+      (_proj, harnessDir) => {
+        writeFileSync(join(harnessDir, "agents", `${agent}.md`), earlier);
+      },
+    );
+    const stagesDir = join(proj, ".kiro", "aidlc-common", "stages", "inception");
+    expect(existsSync(join(stagesDir, `${plugin}-led.md`))).toBe(true);
+    expect(drops).not.toContain(`agent "${agent}"`);
+    expect(drops).not.toContain("collides with an existing file");
+    const persona = readFileSync(join(proj, ".kiro", "agents", `${agent}.md`), "utf-8");
+    const core = readFileSync(join(proj, ".kiro", "agents", "aidlc-product-agent.md"), "utf-8");
+    expect(kiroIdeGrant(persona)).toBe(kiroIdeGrant(core));
+  });
+
+  test("Kiro IDE leaves a user-edited persona alone and keeps its stage rejected", () => {
+    const plugin = "syn-kiro-ide-edited";
+    const agent = `${plugin}-agent`;
+    const files = kiroIdeShippedPersonaPlugin(plugin);
+    const edited = files[`agents/${agent}.md`]
+      .replace("disallowedTools: Task\n", "")
+      .replace("# syn-kiro-ide-edited", "# edited by hand");
+    const { drops, proj } = composeSynthetic(
+      plugin,
+      files,
+      "kiro-ide",
+      (_proj, harnessDir) => {
+        writeFileSync(join(harnessDir, "agents", `${agent}.md`), edited);
+      },
+    );
+    const stagesDir = join(proj, ".kiro", "aidlc-common", "stages", "inception");
+    expect(existsSync(join(stagesDir, `${plugin}-led.md`))).toBe(false);
+    expect(drops).toContain(`agent "${agent}"`);
+    expect(readFileSync(join(proj, ".kiro", "agents", `${agent}.md`), "utf-8")).toBe(edited);
+  });
+
   // OpenCode dispatches from the native roster .opencode/agents/<a>.md. A
   // dispatched stage naming an agent with no native file AND no viable plugin
   // twin must drop (the native emitter would leave a dangling dispatch target);
