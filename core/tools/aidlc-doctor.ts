@@ -136,7 +136,7 @@ function pluginCheck(projectDir: string, verbose: boolean): DoctorCheck {
       pass: false,
       severity: "warn",
       label: `Plugins: ${drift.length} require sync${detail}`,
-      fix: "run `aidlc config`",
+      fix: `run \`${aidlcInvocation()} config\``,
     };
   }
   return {

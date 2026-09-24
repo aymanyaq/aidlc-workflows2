@@ -583,7 +583,7 @@ describe("t242 transactional sync and ownership-safe prune", () => {
       pass: false,
       severity: "warn",
       label: "Plugins: 1 require sync",
-      fix: "run `aidlc config`",
+      fix: "run `bun .claude/tools/aidlc.ts config`",
     }));
   }, 60_000);
 
