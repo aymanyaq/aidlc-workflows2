@@ -350,6 +350,52 @@ Omit `severity` for the default `error` behavior. Use `advisory` for a visible
 finding that must not fail doctor. Keep the script read-only and dependency-free;
 doctor bounds its runtime/output and turns script failures into diagnostic rows.
 
+### Ship MCP servers and grant agents their tools
+
+A workflow whose agents act on other systems (a ticketing system, a change
+database, a cloud API) reaches them through MCP servers. Declare those servers
+in `.mcp.json` at the plugin root, in the standard shape:
+
+```json
+{
+  "mcpServers": {
+    "servicenow": { "type": "http", "url": "https://<instance>.service-now.com/mcp" },
+    "tickets": {
+      "type": "stdio",
+      "command": "sh",
+      "args": ["-c", "exec node \"${CLAUDE_PLUGIN_ROOT}/mcp/tickets.js\""]
+    }
+  }
+}
+```
+
+The build ships `.mcp.json` in the Claude Code and Copilot plugin projections,
+which both read it from the plugin root, and each host starts the servers when
+the plugin is installed. Other harnesses get no copy; their users configure the
+servers on their host, and VALIDATE says so. Keep credentials out of the file:
+a remote server authenticates with the user's own sign-in or environment, never
+a committed token. A local server that needs files from the plugin can use the
+`sh -c` form above: Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` before the
+shell runs, and Copilot sets `CLAUDE_PLUGIN_ROOT` (and `PLUGIN_ROOT`) in the
+server's environment for the shell to expand.
+
+Then grant each agent the MCP tools it acts through, in its frontmatter:
+
+```yaml
+disallowedTools: Task
+mcp_tools:
+  - servicenow/create_change_request
+  - tickets/*          # every tool the tickets server offers
+```
+
+Entries are `<server>/<tool>` or `<server>/*`. On Copilot, compose appends them
+to the agent's `tools:` allowlist, which otherwise holds only the built-in
+worker tools, so a delegated agent can call exactly these MCP tools and no
+others. Claude Code subagents already inherit every MCP server in the session,
+so there the field is informational. VALIDATE rejects a malformed entry and
+warns about a server the plugin does not declare, since each user must then
+configure it.
+
 ## 5. Distribution + install
 
 The shipped builder emits your plugin as **a real host plugin** for one harness

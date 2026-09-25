@@ -1066,15 +1066,51 @@ function emitOpencodeNativeAgent({ file, content }: CopyContext): string {
   return content.replace(m[0], () => `---\n${fm}\n---\n`);
 }
 
-function emitCopilotNativeAgent({ file, content }: CopyContext): string {
+const MCP_TOOL_GRANT = /^[A-Za-z0-9][A-Za-z0-9_-]*\/(\*|[A-Za-z0-9][A-Za-z0-9_.-]*)$/;
+
+// A plugin agent's `mcp_tools:` names the MCP tools it acts through, as
+// <server>/<tool> or <server>/*. Removes the field and returns its entries.
+function takeMcpToolGrants(lines: string[]): { lines: string[]; grants: string[] } {
+  const kept: string[] = [];
+  const grants: string[] = [];
+  const unquote = (value: string): string => value.trim().replace(/^["']|["']$/g, "");
+  for (let index = 0; index < lines.length; index++) {
+    const field = lines[index].match(/^mcp_tools:\s*(.*)$/);
+    if (!field) {
+      kept.push(lines[index]);
+      continue;
+    }
+    if (field[1].trim().startsWith("[")) {
+      grants.push(...field[1].trim().replace(/^\[|\]$/g, "").split(",").map(unquote).filter(Boolean));
+      continue;
+    }
+    while (index + 1 < lines.length && /^\s+-\s+\S/.test(lines[index + 1])) {
+      index++;
+      grants.push(unquote(lines[index].replace(/^\s+-\s+/, "")));
+    }
+  }
+  return { lines: kept, grants };
+}
+
+// Copilot names MCP tools <server>/<tool> (or <server>/*) in a custom agent's
+// tools allowlist, so an agent's MCP grants join the worker tools there.
+function emitCopilotNativeAgent({ file, rel, content }: CopyContext): string {
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
   if (!m) throw new Error(`${file}: plugin agent has no closed frontmatter block`);
-  const fm = m[1]
-    .split(/\r?\n/)
+  const { lines, grants } = takeMcpToolGrants(m[1].split(/\r?\n/));
+  const valid = grants.filter((grant) => MCP_TOOL_GRANT.test(grant));
+  for (const grant of grants.filter((entry) => !MCP_TOOL_GRANT.test(entry))) {
+    recordDrop(
+      `plugin "${PLUGIN_NAME}" agent file "${rel}" mcp_tools entry "${grant}" is not <server>/<tool> or <server>/*; not granted`,
+      "advisory",
+    );
+  }
+  const tools = [...COPILOT_WORKER_TOOLS, ...valid];
+  const fm = lines
     .flatMap((line) => {
       if (/^(tier|model|effort):/.test(line)) return [];
       if (/^disallowedTools:/.test(line)) {
-        return [`tools: [${COPILOT_WORKER_TOOLS.map((tool) => `"${tool}"`).join(", ")}]`];
+        return [`tools: [${tools.map((tool) => `"${tool}"`).join(", ")}]`];
       }
       return [line];
     })

@@ -194,9 +194,14 @@ then use the ignored local `dist/copilot/` output.
 - **No statusline**; use `/aidlc --status` and the progress lines at gates.
 - **Construction swarm is subagent fan-out only** (`AIDLC_USE_SWARM=1` is a
   loud no-op).
-- **MCP**: none ships. If you add servers, note the surfaces diverge here —
-  the CLI reads `~/.copilot/mcp-config.json`, VS Code reads `.vscode/mcp.json`;
-  the conductor can use them, but delegated worker personas cannot.
+- **MCP**: the core install ships no MCP servers. If you add servers, note the
+  surfaces diverge here — the CLI reads `~/.copilot/mcp-config.json` (and a
+  workspace `.mcp.json` or `.github/mcp.json`), VS Code reads `.vscode/mcp.json`.
+  The conductor can use them. Core worker personas cannot, because their
+  `tools:` allowlist holds only built-in tools. An AIDLC plugin can ship its
+  own servers in `.mcp.json` and grant its agents named MCP tools with
+  `mcp_tools:`, which compose adds to their Copilot `tools:` allowlist; see
+  [Authoring a Plugin](../../harness-engineering/10-authoring-a-plugin.md#ship-mcp-servers-and-grant-agents-their-tools).
 
 ## Installing AIDLC workflows (plugins)
 

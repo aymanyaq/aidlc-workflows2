@@ -52,6 +52,9 @@ export type PluginValidationRule =
   | "agent-filename"
   | "agent-name"
   | "agent-owner"
+  | "agent-mcp-tools"
+  | "mcp-config"
+  | "mcp-harnesses"
   | "duplicate-artifact-producer"
   | "artifact-namespace"
   | "contribution-target"
@@ -878,6 +881,7 @@ function validateAgents(
   root: string,
   pluginName: string,
   findings: MutableFindings,
+  mcpServers: ReadonlySet<string>,
 ): void {
   const escaped = pluginName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const filenameRe = new RegExp(
@@ -928,7 +932,92 @@ function validateAgents(
         `Set plugin: ${pluginName}.`,
       );
     }
+    for (const entry of listField(frontmatter, "mcp_tools")) {
+      const server = MCP_TOOL_GRANT.exec(entry)?.[1];
+      if (!server) {
+        addError(
+          findings,
+          displayFile,
+          "agent-mcp-tools",
+          `mcp_tools entry "${entry}" must be <server>/<tool> or <server>/*`,
+          "Name the MCP server and one of its tools, or <server>/* for all of them.",
+        );
+      } else if (!mcpServers.has(server)) {
+        addWarning(
+          findings,
+          displayFile,
+          "agent-mcp-tools",
+          `MCP server "${server}" is not declared in this plugin's .mcp.json`,
+          "Declare it in .mcp.json, or document that each user configures it on their host.",
+        );
+      }
+    }
   }
+}
+
+const MCP_TOOL_GRANT = /^([A-Za-z0-9][A-Za-z0-9_-]*)\/(\*|[A-Za-z0-9][A-Za-z0-9_.-]*)$/;
+const MCP_SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+// A plugin's .mcp.json declares the MCP servers its agents act through. The
+// build ships it in Claude Code and Copilot plugin projections, which both read
+// it from the plugin root; returns the declared server names.
+function validateMcp(root: string, findings: MutableFindings): Set<string> {
+  const servers = new Set<string>();
+  const path = join(root, ".mcp.json");
+  if (!existsSync(path)) return servers;
+  const fail = (message: string, fix: string): Set<string> => {
+    addError(findings, ".mcp.json", "mcp-config", message, fix);
+    return servers;
+  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (error) {
+    return fail(
+      `.mcp.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      "Write a JSON object with an mcpServers object.",
+    );
+  }
+  if (!isPlainRecord(parsed) || !isPlainRecord(parsed.mcpServers)) {
+    return fail(
+      ".mcp.json must be a JSON object with an mcpServers object",
+      'Write {"mcpServers": {"<server>": {...}}}.',
+    );
+  }
+  for (const [name, server] of Object.entries(parsed.mcpServers)) {
+    if (!MCP_SERVER_NAME.test(name)) {
+      addError(
+        findings,
+        ".mcp.json",
+        "mcp-config",
+        `MCP server name "${name}" must be letters, digits, "_" and "-"`,
+        "Rename the server; hosts build tool names from it.",
+      );
+      continue;
+    }
+    if (
+      !isPlainRecord(server) ||
+      (typeof server.command !== "string" && typeof server.url !== "string")
+    ) {
+      addError(
+        findings,
+        ".mcp.json",
+        "mcp-config",
+        `MCP server "${name}" needs a command (local) or a url (remote)`,
+        "Give the server a command with args, or the url of a remote endpoint.",
+      );
+      continue;
+    }
+    servers.add(name);
+  }
+  addWarning(
+    findings,
+    ".mcp.json",
+    "mcp-harnesses",
+    "MCP servers are shipped in the Claude Code and Copilot plugin projections only",
+    "Users of other harnesses configure these servers on their host.",
+  );
+  return servers;
 }
 
 function validateTools(
@@ -1049,7 +1138,7 @@ export function validatePluginRoot(
   );
   validateContributions(root, pluginName, findings, options.coreStageSlugs);
   validateScopes(root, pluginName, findings);
-  validateAgents(root, pluginName, findings);
+  validateAgents(root, pluginName, findings, validateMcp(root, findings));
   validateTools(root, findings);
   const composeHook = validateComposeHook(
     root,

@@ -430,6 +430,23 @@ function writeHookWiring(
   );
 }
 
+// Claude Code and Copilot read a plugin's MCP servers from .mcp.json at the
+// plugin root; the other hosts configure MCP servers outside the plugin.
+const MCP_CONFIG_HARNESSES = new Set(["claude", "copilot"]);
+
+function copyPluginMcpConfig(
+  pluginRoot: string,
+  outDir: string,
+  target: PluginTarget,
+): void {
+  const source = join(pluginRoot, ".mcp.json");
+  if (!existsSync(source) || !MCP_CONFIG_HARNESSES.has(target.harnessName)) return;
+  if (lstatSync(source).isSymbolicLink()) {
+    throw new Error(`${source}: plugin MCP config must be a regular file, not a symlink`);
+  }
+  writeFileSync(join(outDir, ".mcp.json"), readFileSync(source));
+}
+
 function copyPluginContent(
   pluginRoot: string,
   outDir: string,
@@ -666,6 +683,7 @@ export function buildPluginProjection(
       );
       writeHookWiring(pluginName, outDir, options.target);
       copyPluginContent(pluginRoot, outDir, options.target, reviewers);
+      copyPluginMcpConfig(pluginRoot, outDir, options.target);
 
       return {
         pluginName,
