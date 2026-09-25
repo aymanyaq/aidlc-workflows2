@@ -164,6 +164,11 @@ export interface GraphStage extends StageEntry {
   // stage-graph.json. The engine's produces filter reads it to prune the
   // per-unit construction matrix; an unlisted artifact applies to all kinds.
   produces_kinds?: Record<string, string[]>;
+  // action_tools / action_record - the MCP tools the stage acts on a remote
+  // system through, and the produces entry recording each outcome. Read by the
+  // plan-approval guard and the required-sections sensor.
+  action_tools?: string[];
+  action_record?: string;
   consumes: Consume[];
   requires_stage: string[];
   // sensors is the stage-side pull import — a list of sensor manifest
@@ -822,6 +827,8 @@ const FIELD_ORDER = [
   "produces",
   "optional_produces",
   "produces_kinds",
+  "action_tools",
+  "action_record",
   "consumes",
   "requires_stage",
   "sensors",
@@ -2558,6 +2565,10 @@ function buildGraphStage(
   }
   if (parsed.produces_kinds !== undefined) {
     stage.produces_kinds = parsed.produces_kinds;
+  }
+  if (parsed.action_tools !== undefined) {
+    stage.action_tools = parsed.action_tools;
+    stage.action_record = parsed.action_record;
   }
   if (parsed.sensors !== undefined) {
     stage.sensors = parsed.sensors;

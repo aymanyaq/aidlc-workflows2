@@ -60,6 +60,16 @@ export interface StageFrontmatter {
   // set - exempt from nothing. Absent map = full matrix. Each key must name a
   // produces entry; each value must be a non-empty list of valid kinds.
   produces_kinds?: Record<string, string[]>;
+  // action_tools - the MCP tools (<server>/<tool> or <server>/*) through which
+  // this stage acts on a remote system. The plan-approval guard allows them
+  // only while this stage is current and every requires_stage stage is
+  // completed, so the approval gate of an earlier stage authorizes the action.
+  // Absent means the stage acts on nothing outside the workspace.
+  action_tools?: string[];
+  // action_record - the produces entry that records each remote outcome
+  // (system, operation, identifier, link, time, result). Required with
+  // action_tools; the required-sections sensor checks its shape at the gate.
+  action_record?: string;
   consumes: Array<{
     artifact: string;
     required: boolean;
@@ -179,7 +189,7 @@ const REQUIRED_FIELDS = [
   "outputs",
 ] as const;
 
-const OPTIONAL_FIELDS = ["number", "name", "plugin", "for_each", "workspace_requires", "optional_produces", "produces_kinds", "sensors", "scopes", "reviewer", "review_artifact", "reviewer_max_iterations", "review_class", "summary_confirmation", "when", "required_sections"] as const;
+const OPTIONAL_FIELDS = ["number", "name", "plugin", "for_each", "workspace_requires", "optional_produces", "produces_kinds", "sensors", "scopes", "reviewer", "review_artifact", "reviewer_max_iterations", "review_class", "summary_confirmation", "when", "required_sections", "action_tools", "action_record"] as const;
 
 const KNOWN_FIELDS = new Set<string>([...REQUIRED_FIELDS, ...OPTIONAL_FIELDS]);
 
@@ -200,6 +210,8 @@ const NUMBER_RE = /^\d+\.\d+$/;
 // Membership validation runs in the doctor graph-references check; here we
 // only assert the string shape.
 const ARTIFACT_SLUG_RE = /^[a-z][a-z0-9-]*$/;
+// An MCP tool as hosts name it in an agent allowlist: <server>/<tool> or <server>/*.
+export const ACTION_TOOL_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*\/(\*|[A-Za-z0-9][A-Za-z0-9_.-]*)$/;
 
 // --- Validator ---
 
@@ -451,6 +463,38 @@ export function validateStageFrontmatter(
           errors.push(`optional_produces[${i}] must be kebab-case, got "${name}"`);
         }
       });
+    }
+  }
+
+  // action_tools / action_record - a stage that acts on a remote system names
+  // the MCP tools it acts through and the produces entry that records each
+  // outcome. Both or neither; the approval that authorizes the action comes
+  // from an earlier stage's gate, so the stage must follow one.
+  if ("action_tools" in o && o.action_tools !== undefined) {
+    checkStringArray(o, "action_tools", errors);
+    const tools: unknown = o.action_tools;
+    if (Array.isArray(tools)) {
+      if (tools.length === 0) errors.push("action_tools must name at least one MCP tool");
+      tools.forEach((tool: unknown, i: number) => {
+        if (typeof tool === "string" && !ACTION_TOOL_RE.test(tool)) {
+          errors.push(`action_tools[${i}] must be <server>/<tool> or <server>/*, got "${tool}"`);
+        }
+      });
+    }
+    if (typeof o.action_record !== "string" || o.action_record === "") {
+      errors.push("action_tools requires action_record, the produces entry that records each remote outcome");
+    }
+    if (!Array.isArray(o.requires_stage) || o.requires_stage.length === 0) {
+      errors.push("action_tools requires requires_stage: the approval gate of an earlier stage authorizes the action");
+    }
+  }
+  if ("action_record" in o && o.action_record !== undefined) {
+    if (typeof o.action_record !== "string") {
+      errors.push(`action_record must be string, got ${describe(o.action_record)}`);
+    } else if (!("action_tools" in o) || o.action_tools === undefined) {
+      errors.push("action_record requires action_tools, the MCP tools the stage acts through");
+    } else if (!Array.isArray(o.produces) || !o.produces.includes(o.action_record)) {
+      errors.push(`action_record "${o.action_record}" is not in produces`);
     }
   }
 

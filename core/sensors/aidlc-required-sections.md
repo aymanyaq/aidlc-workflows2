@@ -20,6 +20,8 @@ output_schema:
   template_expected: string[]
   template_missing: string[]
   config_warning: string
+  action_record: string
+  action_record_findings: string[]
 timeout_seconds: 5
 ---
 
@@ -35,6 +37,13 @@ the batch fan-out. The check reports `edge_block` as `ok`, `absent`,
 `malformed`, or `cyclic`; anything but `ok` fails the sensor at the gate so
 the malformed block never reaches the compiler. Every other artefact keeps
 the generic H2-count check only.
+
+For a stage that acts on a remote system, the artefact named by its
+`action_record` must also carry a `## Remote Outcomes` table with the columns
+System, Operation, Identifier, Link, Performed, and Result, and at least one
+row with every one of those cells filled. A failed action is still a row, with
+the failure as its result. The check reports `action_record` as `ok` or
+`incomplete`, with the gaps in `action_record_findings`.
 
 ## Heading-set overrides — two paths, with precedence
 

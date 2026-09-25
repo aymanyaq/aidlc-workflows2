@@ -1366,6 +1366,16 @@ async function runCanonical(
           }
         }
       }
+      // An MCP tool (Copilot names it <server>-<tool>) reaches the
+      // plan-approval guard, which refuses a remote action a stage declares
+      // outside that stage's approved window and allows every other MCP call.
+      if (/[-/]/.test(rawToolName)) {
+        const action = runCoreWithStderr("aidlc-plan-approval-guard.ts", canonicalInput);
+        if (action.code === 2) {
+          emit(denyJson(action.stderr));
+          return 0;
+        }
+      }
       return 0;
     }
 

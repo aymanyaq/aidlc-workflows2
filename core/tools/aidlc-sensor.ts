@@ -611,6 +611,11 @@ function handleFire(args: string[]): void {
 		// override above misses, so resolution is team → framework-default → floor.
 		// Ships zero files at GA → the branch gracefully falls through to the floor.
 		scriptArgs.push("--framework-templates-dir", frameworkTemplatesDir());
+		// A stage that acts on a remote system names the artifact recording each
+		// outcome; the script checks that record's Remote Outcomes table.
+		if (stageNode.action_record) {
+			scriptArgs.push("--action-record", stageNode.action_record);
+		}
 	}
 	const detailDir = join(sensorsDir(projectDir), stageSlug);
 	const detailPath = join(detailDir, `${id}-${fireId}.md`);

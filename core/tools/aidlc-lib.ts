@@ -121,6 +121,10 @@ export interface StageEntry {
   // unit whose kind is not in its list (both directive paths and coverage).
   // Absent map = full matrix (every produces entry applies to every unit).
   produces_kinds?: Record<string, string[]>;
+  // MCP tools the stage acts on a remote system through, and the produces
+  // entry recording each outcome (see GraphStage in aidlc-graph.ts).
+  action_tools?: string[];
+  action_record?: string;
   consumes?: Array<{ artifact: string; required: boolean; conditional_on?: string }>;
   requires_stage?: string[];
   scopes?: string[];
@@ -29221,6 +29225,7 @@ export function parseStageFrontmatter(
     // an empty-string value.
     if (key === "optional_produces") continue;
     if (key === "required_sections") continue;
+    if (key === "action_tools") continue;
     // The key was discovered at the start of some line, so it IS
     // present. scalarField returns "" for both absent AND empty-quoted
     // ("") — since we know it's present, assign the result
@@ -29266,6 +29271,13 @@ export function parseStageFrontmatter(
   // "required_sections must be array, got string".
   if (topLevelKeys.has("required_sections")) {
     obj.required_sections = listField(fm, "required_sections");
+  }
+
+  // action_tools is an OPTIONAL array field: the MCP tools (<server>/<tool> or
+  // <server>/*) through which the stage acts on a remote system. Absent key ->
+  // absent property, so stages that do not act stay byte-identical.
+  if (topLevelKeys.has("action_tools")) {
+    obj.action_tools = listField(fm, "action_tools");
   }
 
   // reviewer_max_iterations is the one numeric scalar field. The generic
@@ -29551,6 +29563,8 @@ export function emitStageFrontmatter(obj: Record<string, unknown>): string {
     "produces",
     "optional_produces",
     "produces_kinds",
+    "action_tools",
+    "action_record",
     "consumes",
     "requires_stage",
     "sensors",

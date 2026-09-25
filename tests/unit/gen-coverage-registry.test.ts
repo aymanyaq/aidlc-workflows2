@@ -923,6 +923,7 @@ describe("mechanismsOf is body-derived (milestone 3)", () => {
     "unit/t345-full-suite-workflow.test.ts",
     "unit/t349-plugin-catalog.test.ts",
     "unit/t350-plugin-mcp.test.ts",
+    "unit/t351-remote-actions.test.ts",
     "integration/t102.test.ts",
     "integration/t104.test.ts",
     "integration/t105.test.ts",

@@ -1079,6 +1079,83 @@ async function mutationIntent(
 // the first tool call that passes under it appends one GUARD_DISABLED row, and
 // consecutive calls append nothing until some other row lands in the active
 // shard. Every failure in this bookkeeping still allows the call.
+// --- Remote actions ----------------------------------------------------------
+// A stage that acts on a remote system declares the MCP tools it acts through
+// (`action_tools`, as <server>/<tool> or <server>/*). Hosts name an MCP tool
+// differently at PreToolUse: Claude Code and Codex mcp__<server>__<tool>,
+// Copilot <server>-<tool>, and an allowlist <server>/<tool>. A declared tool is
+// allowed only while its stage is current and every requires_stage stage is
+// completed, so the approval gate of the stage that planned the action has
+// passed. Tools no stage declares, and calls outside a workflow, are not this
+// check's business.
+export function actionToolMatches(grant: string, toolName: string): boolean {
+  const slash = grant.indexOf("/");
+  if (slash <= 0) return false;
+  const server = grant.slice(0, slash);
+  const tool = grant.slice(slash + 1);
+  const prefixes = [`mcp__${server}__`, `${server}-`, `${server}/`];
+  return tool === "*"
+    ? prefixes.some((prefix) => toolName.startsWith(prefix) && toolName.length > prefix.length)
+    : prefixes.some((prefix) => toolName === `${prefix}${tool}`);
+}
+
+// Built-in tool names reaching this hook carry neither "-" nor "/"; an MCP
+// tool's always does (mcp__<server>__<tool>, <server>-<tool>, <server>/<tool>).
+export function isMcpToolName(toolName: string): boolean {
+  return toolName.startsWith("mcp__") || /[-/]/.test(toolName);
+}
+
+export function remoteActionRefusal(
+  stages: ReadonlyArray<{ slug: string; action_tools?: string[]; requires_stage?: string[] }>,
+  toolName: string,
+  currentStage: string,
+  stageStates: ReadonlyMap<string, string>,
+): { reason: string; stages: string[] } | null {
+  const declaring = stages.filter((stage) =>
+    (stage.action_tools ?? []).some((grant) => actionToolMatches(grant, toolName))
+  );
+  if (declaring.length === 0) return null;
+  const here = declaring.find((stage) => stage.slug === currentStage);
+  if (!here) {
+    const slugs = declaring.map((stage) => stage.slug);
+    return {
+      stages: slugs,
+      reason: `${toolName} acts on a remote system, so it runs only in the ${slugs.join(" or ")} stage, after the stage that plans the action is approved; the current stage is ${currentStage || "none"}. Continue the workflow to that stage instead of acting now.`,
+    };
+  }
+  const unapproved = (here.requires_stage ?? []).filter((slug) => stageStates.get(slug) !== "completed");
+  if (unapproved.length === 0) return null;
+  return {
+    stages: [here.slug],
+    reason: `${toolName} acts on a remote system, and ${here.slug} may call it only after ${unapproved.join(", ")} ${unapproved.length === 1 ? "is" : "are"} approved and completed. Present that stage's approval gate first; the action runs after the human approves the plan.`,
+  };
+}
+
+function auditRemoteActionRefusal(projectDir: string, toolName: string, stages: string[]): void {
+  try {
+    if (!existsSync(auditFilePath(projectDir))) return;
+    if (!acquireAuditLock(projectDir, 5, 50)) {
+      recordHookDrop(
+        projectDir,
+        HOOK_NAME,
+        "audit lock contended; PLAN_APPROVAL_BLOCKED row for a remote action dropped (block still enforced)",
+      );
+      return;
+    }
+    try {
+      appendAuditEntryUnlocked(
+        "PLAN_APPROVAL_BLOCKED",
+        { Tool: toolName, Target: "remote action", Stage: stages.join(", "), Unit: "(remote action)" },
+        projectDir,
+      );
+    } finally {
+      releaseAuditLock(projectDir);
+    }
+  } catch {
+    // Advisory emission only: an audit failure never changes the block.
+  }
+}
+
 function recordGuardDisabled(input: string): void {
   const projectDir = resolveProjectDirFromHook(import.meta.url);
   if (!existsSync(stateFilePath(projectDir))) return;
@@ -1236,6 +1313,28 @@ export async function run(input: string): Promise<number> {
     const activeDirective = readActiveDirectiveMarker(projectDir, state);
     const durableStage = normalizeStageName(currentStage);
     const directiveStage = normalizeStageName(activeDirective?.stage ?? "");
+    let actionStages: ReturnType<typeof loadStageGraph> = [];
+    try {
+      actionStages = loadStageGraph().filter((stage) => (stage.action_tools ?? []).length > 0);
+    } catch {
+      // No readable graph declares no remote action.
+    }
+    const action = remoteActionRefusal(
+      actionStages,
+      toolName,
+      directiveStage || durableStage,
+      new Map(parseCheckboxes(state).map((line) => [line.slug, line.state])),
+    );
+    if (action !== null) {
+      auditRemoteActionRefusal(projectDir, toolName, action.stages);
+      process.stderr.write(
+        `${action.reason}${dispatchedActor ? "" : ` ${fenceSwitchSentence(projectDir, "plan-approval", state)}`}\n`,
+      );
+      return 2;
+    }
+    // An MCP tool reaches this hook only for the remote-action check above;
+    // the code-generation fence governs workspace mutation, not MCP calls.
+    if (isMcpToolName(toolName)) return 0;
     const dispatchPrompt = [toolInput.prompt, toolInput.description]
       .filter((value): value is string => typeof value === "string")
       .join("\n");

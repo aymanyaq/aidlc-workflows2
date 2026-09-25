@@ -30,6 +30,11 @@ interface Result {
 	// stage does not declare template-eligible (the stem==artifact key is
 	// unsound for questions/timestamp markers). Surfaced, not fatal.
 	config_warning?: string;
+	// Populated only when the output is the stage's action_record: "ok" once
+	// its Remote Outcomes table names every required column and fills every
+	// cell of at least one row, otherwise "incomplete" with the findings.
+	action_record?: "ok" | "incomplete";
+	action_record_findings?: string[];
 }
 
 interface Flags {
@@ -53,6 +58,10 @@ interface Flags {
 	// applies ONLY when basename(outputPath) stem ∈ this set; otherwise it is
 	// ignored + a config warning emitted. Absent/empty → no artifact is eligible.
 	templateEligible?: string[];
+	// The artifact name (output-filename stem) that records the stage's remote
+	// actions, threaded from the stageNode's action_record. Absent -> the stage
+	// acts on nothing remote.
+	actionRecord?: string;
 }
 
 function parseFlags(argv: string[]): Flags {
@@ -67,6 +76,8 @@ function parseFlags(argv: string[]): Flags {
 			out.templatesDir = argv[++i];
 		} else if (arg === "--framework-templates-dir") {
 			out.frameworkTemplatesDir = argv[++i];
+		} else if (arg === "--action-record") {
+			out.actionRecord = argv[++i];
 		} else if (arg === "--template-eligible") {
 			out.templateEligible = (argv[++i] ?? "")
 				.split(",")
@@ -75,6 +86,41 @@ function parseFlags(argv: string[]): Flags {
 		}
 	}
 	return out;
+}
+
+// A stage's action_record lists each remote outcome in a `## Remote Outcomes`
+// table: one row per action, naming the system, the operation, the remote
+// identifier, a link to it, when it was performed, and the result. A failed
+// action is still a row, with its failure as the result.
+export const REMOTE_OUTCOME_COLUMNS = ["System", "Operation", "Identifier", "Link", "Performed", "Result"];
+
+function tableCells(line: string): string[] {
+	return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+}
+
+export function remoteOutcomeFindings(body: string): string[] {
+	const lines = body.split(/\r?\n/);
+	const start = lines.findIndex((line) => /^##\s+Remote Outcomes\s*$/i.test(line.trim()));
+	if (start === -1) return ["missing the ## Remote Outcomes section"];
+	const section: string[] = [];
+	for (const line of lines.slice(start + 1)) {
+		if (line.trim().startsWith("## ")) break;
+		section.push(line);
+	}
+	const table = section.filter((line) => line.trim().startsWith("|"));
+	if (table.length === 0) return ["## Remote Outcomes has no table"];
+	const header = tableCells(table[0]).map((cell) => cell.toLowerCase());
+	const missing = REMOTE_OUTCOME_COLUMNS.filter((column) => !header.includes(column.toLowerCase()));
+	if (missing.length > 0) return [`Remote Outcomes table is missing column(s): ${missing.join(", ")}`];
+	const rows = table.slice(1).filter((line) => !/^\|?[\s:|-]+\|?$/.test(line.trim()));
+	if (rows.length === 0) return ["Remote Outcomes table has no rows; record each action, including a failed one"];
+	const findings: string[] = [];
+	rows.forEach((line, index) => {
+		const cells = tableCells(line);
+		const empty = REMOTE_OUTCOME_COLUMNS.filter((column) => !cells[header.indexOf(column.toLowerCase())]);
+		if (empty.length > 0) findings.push(`Remote Outcomes row ${index + 1} has no ${empty.join(", ")}`);
+	});
+	return findings;
 }
 
 // Parse the distinct, ordered `^## ` headings of a markdown body (trimmed,
@@ -232,6 +278,18 @@ export function main(argv: string[]): void {
 		if (edge_block !== "ok") {
 			pass = false;
 			findings_count += 1;
+		}
+	}
+
+	// The stage's action_record must say what was done where: its Remote
+	// Outcomes table is the durable account of actions taken on remote systems.
+	if (flags.actionRecord && stem === flags.actionRecord) {
+		const findings = remoteOutcomeFindings(body);
+		result.action_record = findings.length === 0 ? "ok" : "incomplete";
+		if (findings.length > 0) {
+			result.action_record_findings = findings;
+			pass = false;
+			findings_count += findings.length;
 		}
 	}
 
