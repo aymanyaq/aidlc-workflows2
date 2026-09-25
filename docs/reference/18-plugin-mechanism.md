@@ -225,7 +225,15 @@ The host owns published-versus-installed state. AIDLC compares that installed
 state with project-local composition state, entirely offline:
 
 - Claude reads schema-v2 `~/.claude/plugins/installed_plugins.json` and
-  `enabledPlugins` from `~/.claude/settings.json`.
+  merges `enabledPlugins` per plugin ID the way Claude Code layers its
+  settings: `<project>/.claude/settings.local.json` (local scope) overrides
+  `<project>/.claude/settings.json` (project scope), which overrides
+  `~/.claude/settings.json` (user scope; `AIDLC_CLAUDE_SETTINGS` replaces
+  only this layer). A project that sets a user-scope plugin to `false` gets
+  it reported as disabled and not composed. If any existing layer is not a
+  JSON object, or its `enabledPlugins` is not an object, enablement is
+  unproven and Claude falls back to the current-root-only inventory described
+  for Kiro below.
 - Codex reads only plugin IDs declared in `~/.codex/config.toml`, then inspects
   their exact cache paths under
   `~/.codex/plugins/cache/<marketplace>/<plugin>/<version-or-local>/`.

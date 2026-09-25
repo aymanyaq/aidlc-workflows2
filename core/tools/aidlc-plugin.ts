@@ -345,16 +345,44 @@ function currentRootInventory(harness: PluginInventory["harness"]): PluginInvent
   };
 }
 
-function claudeInventory(): PluginInventory {
+// Claude Code layers enabledPlugins per plugin ID like its other settings:
+// local (<project>/.claude/settings.local.json) over project
+// (<project>/.claude/settings.json) over user. A layer that cannot be read as
+// an object leaves enablement unproven, so the caller gets null.
+function claudeEnabledPlugins(projectDir: string): Map<string, unknown> | null {
+  const userSettings = absolute(
+    process.env.AIDLC_CLAUDE_SETTINGS ??
+      join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "settings.json"),
+  );
+  const projectSettings = join(absolute(projectDir), ".claude");
+  const enabledPlugins = new Map<string, unknown>();
+  for (const settingsPath of [
+    userSettings,
+    join(projectSettings, "settings.json"),
+    join(projectSettings, "settings.local.json"),
+  ]) {
+    if (!existsSync(settingsPath)) continue;
+    let settings: unknown;
+    try {
+      settings = readJson(settingsPath);
+    } catch {
+      return null;
+    }
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) return null;
+    const rawEnabled = (settings as Record<string, unknown>).enabledPlugins;
+    if (rawEnabled === undefined) continue;
+    if (!rawEnabled || typeof rawEnabled !== "object" || Array.isArray(rawEnabled)) return null;
+    for (const [id, value] of Object.entries(rawEnabled)) enabledPlugins.set(id, value);
+  }
+  return enabledPlugins;
+}
+
+function claudeInventory(projectDir: string): PluginInventory {
   const registryPath = absolute(
     process.env.AIDLC_CLAUDE_PLUGIN_REGISTRY ??
       join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "plugins", "installed_plugins.json"),
   );
   if (!existsSync(registryPath)) return currentRootInventory("claude");
-  const settingsPath = absolute(
-    process.env.AIDLC_CLAUDE_SETTINGS ??
-      join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "settings.json"),
-  );
   const invalid: InvalidInstalledPlugin[] = [];
   const installed: InstalledPlugin[] = [];
   let registry: unknown;
@@ -369,25 +397,8 @@ function claudeInventory(): PluginInventory {
       invalid: [{ paths: [registryPath], message: `invalid Claude plugin registry: ${errorMessage(error)}` }],
     };
   }
-  let enabledPlugins: Record<string, unknown> = {};
-  if (existsSync(settingsPath)) {
-    let settings: unknown;
-    try {
-      settings = readJson(settingsPath);
-    } catch {
-      return currentRootInventory("claude");
-    }
-    if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
-      return currentRootInventory("claude");
-    }
-    const rawEnabled = (settings as Record<string, unknown>).enabledPlugins;
-    if (rawEnabled !== undefined) {
-      if (!rawEnabled || typeof rawEnabled !== "object" || Array.isArray(rawEnabled)) {
-        return currentRootInventory("claude");
-      }
-      enabledPlugins = rawEnabled as Record<string, unknown>;
-    }
-  }
+  const enabledPlugins = claudeEnabledPlugins(projectDir);
+  if (enabledPlugins === null) return currentRootInventory("claude");
   const plugins = registry && typeof registry === "object" &&
       !Array.isArray(registry) &&
       (registry as Record<string, unknown>).version === 2 &&
@@ -420,7 +431,7 @@ function claudeInventory(): PluginInventory {
           invalid.push({ paths: [registryPath], message: `Claude plugin "${id}" has no installPath` });
           continue;
         }
-        const normalized = invalidFromRoot(root, "claude", enabledPlugins[id] !== false, version);
+        const normalized = invalidFromRoot(root, "claude", enabledPlugins.get(id) !== false, version);
         if ("root" in normalized) installed.push(normalized);
         else invalid.push({ ...normalized, key: registryName.slice("aidlc-".length) });
       }
@@ -525,9 +536,12 @@ function codexInventory(): PluginInventory {
   };
 }
 
-export function discoverPluginInventory(harnessDir = runtimeHarnessDir()): PluginInventory {
+export function discoverPluginInventory(
+  harnessDir = runtimeHarnessDir(),
+  projectDir = resolveProjectDir(),
+): PluginInventory {
   const harness = harnessKind(harnessDir);
-  if (harness === "claude") return claudeInventory();
+  if (harness === "claude") return claudeInventory(projectDir);
   if (harness === "codex") return codexInventory();
   return currentRootInventory(harness);
 }
@@ -755,7 +769,7 @@ export function collectPluginStatus(
   projectDir: string,
   harnessDir = runtimeHarnessDir(projectDir),
 ): { inventory: PluginInventory; statuses: PluginStatus[] } {
-  const inventory = discoverPluginInventory(harnessDir);
+  const inventory = discoverPluginInventory(harnessDir, projectDir);
   const evidence = projectEvidence(projectDir, harnessDir);
   const selection = selectedPlugins(projectDir, harnessDir);
   return {
@@ -1312,7 +1326,7 @@ export async function syncPlugins(
   const harness = harnessKind(harnessDir);
   const inventory = currentRoots().length > 0
     ? currentRootInventory(harness)
-    : discoverPluginInventory(harnessDir);
+    : discoverPluginInventory(harnessDir, projectDir);
   const evidence = projectEvidence(projectDir, harnessDir);
   const selection = selectedPlugins(projectDir, harnessDir);
   const prune = argv.includes("--prune-missing");

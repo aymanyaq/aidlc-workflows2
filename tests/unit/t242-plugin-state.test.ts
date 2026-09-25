@@ -142,6 +142,34 @@ function withClaudeFixture(root: string, version = "0.1.0"): void {
   process.env.AIDLC_HARNESS_DIR = ".claude";
 }
 
+function withClaudeRegistry(plugins: Record<string, Array<Record<string, unknown>>>): void {
+  const fixtureDir = temp("aidlc-claude-scopes-");
+  writeFileSync(join(fixtureDir, "installed.json"), JSON.stringify({ version: 2, plugins }));
+  writeFileSync(join(fixtureDir, "settings.json"), "{}");
+  process.env.AIDLC_CLAUDE_PLUGIN_REGISTRY = join(fixtureDir, "installed.json");
+  process.env.AIDLC_CLAUDE_SETTINGS = join(fixtureDir, "settings.json");
+  process.env.AIDLC_HARNESS_DIR = ".claude";
+}
+
+function projectRecord(projectPath: string, installPath: string): Record<string, unknown> {
+  return { scope: "project", projectPath, installPath, version: "0.1.0" };
+}
+
+// Merges enabledPlugins into one of Claude Code's project settings layers,
+// keeping whatever else the installed project's settings file already holds.
+function claudeProjectEnablement(
+  projectDir: string,
+  layer: "settings.json" | "settings.local.json",
+  enabledPlugins: Record<string, unknown>,
+): void {
+  const path = join(projectDir, ".claude", layer);
+  const settings = existsSync(path)
+    ? JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>
+    : {};
+  mkdirSync(join(projectDir, ".claude"), { recursive: true });
+  writeFileSync(path, `${JSON.stringify({ ...settings, enabledPlugins }, null, 2)}\n`);
+}
+
 afterEach(() => {
   for (const key of Object.keys(process.env)) {
     if (!(key in ORIGINAL_ENV)) delete process.env[key];
@@ -249,6 +277,79 @@ describe("t242 fixture-proved host inventories", () => {
         action: "attention",
       }),
     ]);
+  });
+
+  test("Claude project settings disable a user-scope install for that project only", () => {
+    const root = pluginRoot();
+    const project = temp("aidlc-claude-project-");
+    withClaudeFixture(root);
+    claudeProjectEnablement(project, "settings.json", {
+      "aidlc-test-pro@fixture-marketplace": false,
+    });
+    expect(discoverPluginInventory(".claude", project).installed).toEqual([
+      expect.objectContaining({ key: "test-pro", enabled: false }),
+    ]);
+    expect(discoverPluginInventory(".claude", temp("aidlc-claude-other-")).installed).toEqual([
+      expect.objectContaining({ key: "test-pro", enabled: true }),
+    ]);
+
+    writeFileSync(
+      process.env.AIDLC_CLAUDE_SETTINGS as string,
+      '{"enabledPlugins":{"aidlc-test-pro@fixture-marketplace":false}}\n',
+    );
+    claudeProjectEnablement(project, "settings.json", {
+      "aidlc-test-pro@fixture-marketplace": true,
+    });
+    expect(discoverPluginInventory(".claude", project).installed).toEqual([
+      expect.objectContaining({ key: "test-pro", enabled: true }),
+    ]);
+  });
+
+  test("Claude local settings override the project enablement layer", () => {
+    const root = pluginRoot();
+    const project = temp("aidlc-claude-project-");
+    withClaudeRegistry({
+      "aidlc-test-pro@fixture-marketplace": [projectRecord(project, root)],
+    });
+    claudeProjectEnablement(project, "settings.json", {
+      "aidlc-test-pro@fixture-marketplace": true,
+    });
+    claudeProjectEnablement(project, "settings.local.json", {
+      "aidlc-test-pro@fixture-marketplace": false,
+    });
+    expect(discoverPluginInventory(".claude", project).installed).toEqual([
+      expect.objectContaining({ key: "test-pro", enabled: false }),
+    ]);
+
+    claudeProjectEnablement(project, "settings.json", {
+      "aidlc-test-pro@fixture-marketplace": false,
+    });
+    claudeProjectEnablement(project, "settings.local.json", {
+      "aidlc-test-pro@fixture-marketplace": true,
+    });
+    expect(discoverPluginInventory(".claude", project).installed).toEqual([
+      expect.objectContaining({ key: "test-pro", enabled: true }),
+    ]);
+  });
+
+  test("Claude downgrades a malformed project or local enablement layer", () => {
+    const root = pluginRoot();
+    withClaudeFixture(root);
+    process.env.AIDLC_PLUGIN_ROOT = "";
+    process.env.CLAUDE_PLUGIN_ROOT = "";
+    process.env.PLUGIN_ROOT = "";
+    for (const layer of ["settings.json", "settings.local.json"]) {
+      for (const content of ["{not-json", "[]", '{"enabledPlugins":[]}']) {
+        const project = temp("aidlc-claude-project-");
+        mkdirSync(join(project, ".claude"));
+        writeFileSync(join(project, ".claude", layer), content);
+        expect(discoverPluginInventory(".claude", project)).toEqual(expect.objectContaining({
+          capability: "current-root-only",
+          installed: [],
+          invalid: [],
+        }));
+      }
+    }
   });
 
   test("Codex enumerates declared IDs and their fixed semver cache path", () => {
@@ -527,6 +628,20 @@ describe("t242 transactional sync and ownership-safe prune", () => {
     ]);
     const second = await syncPlugins(project, [], ".claude");
     expect(second.operations).toBe(0);
+  }, 60_000);
+
+  test("sync does not compose a user-scope plugin the project settings disable", async () => {
+    const project = installedProject();
+    withClaudeFixture(TEST_PRO);
+    claudeProjectEnablement(project, "settings.json", {
+      "aidlc-test-pro@fixture-marketplace": false,
+    });
+    expect((await syncPlugins(project, [], ".claude")).synced).toEqual([]);
+    expect(existsSync(join(project, ".claude", "tools", "data", "plugin-compose-test-pro.json")))
+      .toBe(false);
+    expect(collectPluginStatus(project, ".claude").statuses).toEqual([
+      expect.objectContaining({ key: "test-pro", state: "installed-disabled" }),
+    ]);
   }, 60_000);
 
   test("concurrent syncs converge and the loser replans as an idempotent no-op", async () => {
