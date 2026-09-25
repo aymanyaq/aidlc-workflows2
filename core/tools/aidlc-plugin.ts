@@ -358,10 +358,6 @@ function claudeInventory(projectDir: string): PluginInventory {
       join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "plugins", "installed_plugins.json"),
   );
   if (!existsSync(registryPath)) return currentRootInventory("claude");
-  const settingsPath = absolute(
-    process.env.AIDLC_CLAUDE_SETTINGS ??
-      join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "settings.json"),
-  );
   const invalid: InvalidInstalledPlugin[] = [];
   const installed: InstalledPlugin[] = [];
   let registry: unknown;
@@ -376,15 +372,38 @@ function claudeInventory(projectDir: string): PluginInventory {
       invalid: [{ paths: [registryPath], message: `invalid Claude plugin registry: ${errorMessage(error)}` }],
     };
   }
+  // Claude Code layers enabledPlugins per plugin ID like its other settings:
+  // the project's .claude/settings.local.json over its .claude/settings.json
+  // over the user file, so a project that sets a plugin to false has it off.
+  const userSettingsPath = absolute(
+    process.env.AIDLC_CLAUDE_SETTINGS ??
+      join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "settings.json"),
+  );
+  const projectSettingsPath = join(absolute(projectDir), ".claude", "settings.json");
+  const localSettingsPath = join(absolute(projectDir), ".claude", "settings.local.json");
   // Unreadable enablement cannot prove which plugins are on, so it falls back
   // to the current root, but it stays a named problem the person can fix.
-  const unreadableSettings = (reason: string): PluginInventory => {
+  const unreadableSettings = (path: string, reason: string): PluginInventory => {
     const inventory = currentRootInventory("claude");
-    inventory.invalid.push({ paths: [settingsPath], message: `invalid Claude settings: ${reason}` });
+    inventory.invalid.push({ paths: [path], message: `invalid Claude settings: ${reason}` });
     return inventory;
   };
-  let enabledPlugins: Record<string, unknown> = {};
-  if (existsSync(settingsPath)) {
+  const layers: Record<string, Record<string, unknown>> = {};
+  for (const settingsPath of [userSettingsPath, projectSettingsPath, localSettingsPath]) {
+    layers[settingsPath] = {};
+    if (!existsSync(settingsPath)) continue;
+    // A project layer that cannot be read enables and disables nothing here.
+    if (settingsPath !== userSettingsPath) {
+      try {
+        const raw = (readJson(settingsPath) as Record<string, unknown> | null)?.enabledPlugins;
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          layers[settingsPath] = raw as Record<string, unknown>;
+        }
+      } catch {
+        // Missing or unreadable: no project-level enablement.
+      }
+      continue;
+    }
     let settings: unknown;
     try {
       settings = readJson(settingsPath);
@@ -392,31 +411,33 @@ function claudeInventory(projectDir: string): PluginInventory {
       // Fixed wording only: a parser message can quote the file's content,
       // and this settings file can hold credentials.
       return unreadableSettings(
+        settingsPath,
         error instanceof SyntaxError ? "not valid JSON" : "cannot be read",
       );
     }
     if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
-      return unreadableSettings("expected a JSON object");
+      return unreadableSettings(settingsPath, "expected a JSON object");
     }
     const rawEnabled = (settings as Record<string, unknown>).enabledPlugins;
     if (rawEnabled !== undefined) {
       if (!rawEnabled || typeof rawEnabled !== "object" || Array.isArray(rawEnabled)) {
-        return unreadableSettings("enabledPlugins must be an object");
+        return unreadableSettings(settingsPath, "enabledPlugins must be an object");
       }
-      enabledPlugins = rawEnabled as Record<string, unknown>;
+      layers[settingsPath] = rawEnabled as Record<string, unknown>;
     }
   }
-  // Claude Code loads a project-scope plugin wherever the project's committed
-  // settings enable it, so a second clone or worktree with no record of its
-  // own uses the project-scope records.
-  let projectEnabled: Record<string, unknown> = {};
-  try {
-    const raw = (readJson(join(projectDir, ".claude", "settings.json")) as Record<string, unknown> | null)
-      ?.enabledPlugins;
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) projectEnabled = raw as Record<string, unknown>;
-  } catch {
-    // A missing or unreadable project settings file enables nothing here.
-  }
+  const enabledPlugins: Record<string, unknown> = {
+    ...layers[userSettingsPath],
+    ...layers[projectSettingsPath],
+    ...layers[localSettingsPath],
+  };
+  // Claude Code loads a project-scope plugin wherever the project's settings
+  // enable it, so a second clone or worktree with no record of its own uses
+  // the project-scope records.
+  const projectEnabled: Record<string, unknown> = {
+    ...layers[projectSettingsPath],
+    ...layers[localSettingsPath],
+  };
   const elsewhere = (raw: unknown): boolean => {
     const entry = raw as Record<string, unknown>;
     return !!raw && typeof raw === "object" && !Array.isArray(raw) &&

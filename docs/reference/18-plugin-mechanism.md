@@ -225,15 +225,21 @@ The host owns published-versus-installed state. AIDLC compares that installed
 state with project-local composition state, entirely offline:
 
 - Claude reads schema-v2 `~/.claude/plugins/installed_plugins.json` and
-  `enabledPlugins` from `~/.claude/settings.json`. A Claude `local` or
-  `project` install counts only in its own project, the one that contains the
-  record's `projectPath` (the folder the install ran in, which can be a
-  subdirectory), except that a `project` install also counts in a clone or
-  worktree that has no record of its own when its `.claude/settings.json`
-  enables the plugin, as Claude Code loads it there. When the registry exists
-  but that settings file cannot be read, Claude falls back to the current root
-  and `plugin list` and doctor flag the file as needing attention. Without a
-  registry the settings file is not read (see the fallback below).
+  merges `enabledPlugins` per plugin ID the way Claude Code layers its
+  settings: `<project>/.claude/settings.local.json` (local scope) overrides
+  `<project>/.claude/settings.json` (project scope), which overrides
+  `~/.claude/settings.json` (user scope; `AIDLC_CLAUDE_SETTINGS` replaces
+  only this layer). A project that sets a user-scope plugin to `false` gets
+  it reported as disabled and not composed. A Claude `local` or `project`
+  install counts only in its own project, the one that contains the record's
+  `projectPath` (the folder the install ran in, which can be a subdirectory),
+  except that a `project` install also counts in a clone or worktree that has
+  no record of its own when its project settings enable the plugin, as Claude
+  Code loads it there. A project layer that cannot be read enables and disables
+  nothing. When the registry exists but the user settings file cannot be read,
+  Claude falls back to the current root and `plugin list` and doctor flag the
+  file as needing attention. Without a registry no settings file is read (see
+  the fallback below).
 - Codex reads only plugin IDs declared in `~/.codex/config.toml`, then inspects
   their exact cache paths under
   `~/.codex/plugins/cache/<marketplace>/<plugin>/<version-or-local>/`.
