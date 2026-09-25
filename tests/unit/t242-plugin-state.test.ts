@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -524,6 +525,77 @@ describe("t242 fixture-proved host inventories", () => {
       join(rootB, ".claude-plugin", "plugin.json"),
     ].sort());
   });
+
+  test("Claude ignores project-scope records that belong to another project", () => {
+    const root = pluginRoot();
+    const current = temp("aidlc-claude-current-");
+    const other = temp("aidlc-claude-other-");
+    withClaudeRegistry({
+      "aidlc-test-pro@fixture-marketplace": [projectRecord(other, root)],
+      "aidlc-elsewhere@fixture-marketplace": [
+        projectRecord(other, join(other, "missing-install")),
+        { scope: "local", projectPath: other, installPath: join(other, "missing-install"), version: "0.1.0" },
+      ],
+    });
+    expect(discoverPluginInventory(".claude", current)).toEqual(expect.objectContaining({
+      capability: "full-inventory",
+      installed: [],
+      invalid: [],
+    }));
+
+    withClaudeRegistry({
+      "aidlc-test-pro@fixture-marketplace": [
+        projectRecord(other, root),
+        projectRecord(realpathSync(current), root),
+      ],
+    });
+    const expected = {
+      installed: [expect.objectContaining({ key: "test-pro", root })],
+      invalid: [],
+    };
+    expect(discoverPluginInventory(".claude", current)).toEqual(expect.objectContaining(expected));
+    delete process.env.AIDLC_PROJECT_DIR;
+    process.env.CLAUDE_PROJECT_DIR = current;
+    expect(discoverPluginInventory(".claude")).toEqual(expect.objectContaining(expected));
+  });
+
+  test("Claude records that resolve to one manifest are one install", () => {
+    const root = pluginRoot();
+    const current = temp("aidlc-claude-current-");
+    withClaudeRegistry({
+      "aidlc-test-pro@fixture-marketplace": [
+        { scope: "user", installPath: root, version: "0.1.0" },
+        projectRecord(current, root),
+        projectRecord(current, `${root}/`),
+      ],
+    });
+    expect(discoverPluginInventory(".claude", current)).toEqual(expect.objectContaining({
+      installed: [expect.objectContaining({ key: "test-pro", root })],
+      invalid: [],
+    }));
+  });
+
+  test("distinct manifests claiming one identity for this project still refuse", () => {
+    const rootA = pluginRoot();
+    const rootB = pluginRoot();
+    const rootOther = pluginRoot();
+    const current = temp("aidlc-claude-current-");
+    const other = temp("aidlc-claude-other-");
+    withClaudeRegistry({
+      "aidlc-test-pro@one": [projectRecord(current, rootA), projectRecord(other, rootOther)],
+      "aidlc-test-pro@two": [projectRecord(current, rootB)],
+    });
+    const result = discoverPluginInventory(".claude", current);
+    expect(result.installed).toEqual([]);
+    expect(result.invalid).toEqual([{
+      key: "test-pro",
+      message: 'installed plugin identity "test-pro" is ambiguous across 2 manifests',
+      paths: [
+        join(rootA, ".claude-plugin", "plugin.json"),
+        join(rootB, ".claude-plugin", "plugin.json"),
+      ].sort(),
+    }]);
+  });
 });
 
 describe("t242 pure status comparator", () => {
@@ -642,6 +714,25 @@ describe("t242 transactional sync and ownership-safe prune", () => {
     expect(collectPluginStatus(project, ".claude").statuses).toEqual([
       expect.objectContaining({ key: "test-pro", state: "installed-disabled" }),
     ]);
+  }, 60_000);
+
+  test("one plugin installed at project scope in two projects syncs in each", async () => {
+    const projectA = installedProject();
+    const projectB = installedProject();
+    withClaudeRegistry({
+      "aidlc-test-pro@fixture-marketplace": [
+        projectRecord(projectA, TEST_PRO),
+        projectRecord(projectB, TEST_PRO),
+      ],
+    });
+    for (const key of ["AIDLC_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"]) process.env[key] = "";
+
+    for (const project of [projectA, projectB]) {
+      expect((await syncPlugins(project, [], ".claude")).synced).toEqual(["test-pro"]);
+      expect(collectPluginStatus(project, ".claude").statuses).toEqual([
+        expect.objectContaining({ key: "test-pro", state: "current" }),
+      ]);
+    }
   }, 60_000);
 
   test("concurrent syncs converge and the loser replans as an idempotent no-op", async () => {

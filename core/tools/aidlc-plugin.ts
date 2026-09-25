@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -119,6 +120,15 @@ export type ProjectEvidence = {
 
 function absolute(path: string): string {
   return isAbsolute(path) ? path : resolve(process.cwd(), path);
+}
+
+function canonicalPath(path: string): string {
+  const resolved = absolute(path);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 function readJson(path: string): unknown {
@@ -287,14 +297,18 @@ function deduplicateInventory(
   entries: InstalledPlugin[],
   invalid: InvalidInstalledPlugin[],
 ): { installed: InstalledPlugin[]; invalid: InvalidInstalledPlugin[] } {
-  const byKey = new Map<string, InstalledPlugin[]>();
+  // Several host records can name one install (user scope plus project scope,
+  // or one record per project); records resolving to one manifest are one
+  // install. Only distinct manifests claiming one identity are ambiguous.
+  const byKey = new Map<string, Map<string, InstalledPlugin>>();
   for (const entry of entries) {
-    const values = byKey.get(entry.key) ?? [];
-    values.push(entry);
-    byKey.set(entry.key, values);
+    const manifests = byKey.get(entry.key) ?? new Map<string, InstalledPlugin>();
+    if (!manifests.has(entry.manifestPath)) manifests.set(entry.manifestPath, entry);
+    byKey.set(entry.key, manifests);
   }
   const installed: InstalledPlugin[] = [];
-  for (const [key, values] of byKey) {
+  for (const [key, manifests] of byKey) {
+    const values = [...manifests.values()];
     if (values.length === 1) {
       installed.push(values[0]);
       continue;
@@ -377,6 +391,18 @@ function claudeEnabledPlugins(projectDir: string): Map<string, unknown> | null {
   return enabledPlugins;
 }
 
+// Claude Code records a project- or local-scope install once per project, each
+// with its own projectPath and all sharing one installPath. Such a record
+// belongs to the named project only; user-scope records apply everywhere.
+function claudeRecordAppliesToProject(
+  entry: Record<string, unknown>,
+  projectDir: string,
+): boolean {
+  if (entry.scope !== "project" && entry.scope !== "local") return true;
+  return typeof entry.projectPath === "string" && entry.projectPath !== "" &&
+    canonicalPath(entry.projectPath) === canonicalPath(projectDir);
+}
+
 function claudeInventory(projectDir: string): PluginInventory {
   const registryPath = absolute(
     process.env.AIDLC_CLAUDE_PLUGIN_REGISTRY ??
@@ -425,6 +451,7 @@ function claudeInventory(projectDir: string): PluginInventory {
           continue;
         }
         const entry = rawEntry as Record<string, unknown>;
+        if (!claudeRecordAppliesToProject(entry, projectDir)) continue;
         const root = typeof entry.installPath === "string" ? entry.installPath : "";
         const version = typeof entry.version === "string" ? entry.version : undefined;
         if (!root) {

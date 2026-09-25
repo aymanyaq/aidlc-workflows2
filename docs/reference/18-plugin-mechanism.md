@@ -234,6 +234,10 @@ state with project-local composition state, entirely offline:
   JSON object, or its `enabledPlugins` is not an object, enablement is
   unproven and Claude falls back to the current-root-only inventory described
   for Kiro below.
+  User-scope registry records always count; a project- or local-scope record
+  counts only when its `projectPath` is the project being checked
+  (`--project-dir`, `AIDLC_PROJECT_DIR`, or `CLAUDE_PROJECT_DIR`), so one
+  plugin installed at project scope in several projects does not collide.
 - Codex reads only plugin IDs declared in `~/.codex/config.toml`, then inspects
   their exact cache paths under
   `~/.codex/plugins/cache/<marketplace>/<plugin>/<version-or-local>/`.
@@ -248,9 +252,10 @@ state with project-local composition state, entirely offline:
 
 Each adapter reads one host-native manifest (`.claude-plugin/plugin.json`,
 `.codex-plugin/plugin.json`, or `.kiro-plugin/plugin.json`). Owned manifests
-must use `name: aidlc-<key>`, a safe key, and a semver version. Duplicate
-identities are rejected with every source path; no adapter recursively scans a
-home or cache directory.
+must use `name: aidlc-<key>`, a safe key, and a semver version. Host records
+that resolve to the same manifest path are one install. Distinct manifests
+claiming one identity are rejected with every source path; no adapter
+recursively scans a home or cache directory.
 
 After composition, AIDLC writes
 `<harness-dir>/tools/data/plugin-compose-<key>.json` with the plugin name,
