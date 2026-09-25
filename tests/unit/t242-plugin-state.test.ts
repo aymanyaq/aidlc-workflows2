@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import {
   collectPluginStatus,
@@ -59,21 +59,24 @@ function surfaceSnapshot(root: string): Record<string, string> {
 }
 
 function pluginRoot(
-  harness: "claude" | "codex" | "kiro" = "claude",
+  harness: "claude" | "codex" | "kiro" | "copilot" = "claude",
   version = "0.1.0",
+  key = "test-pro",
 ): string {
   const root = temp("aidlc-plugin-fixture-");
   const manifestDir = harness === "claude"
     ? ".claude-plugin"
     : harness === "codex"
     ? ".codex-plugin"
+    : harness === "copilot"
+    ? ".plugin"
     : ".kiro-plugin";
   mkdirSync(join(root, manifestDir), { recursive: true });
   mkdirSync(join(root, "stages", "construction"), { recursive: true });
   mkdirSync(join(root, "hooks"), { recursive: true });
   writeFileSync(
     join(root, manifestDir, "plugin.json"),
-    `${JSON.stringify({ name: "aidlc-test-pro", version })}\n`,
+    `${JSON.stringify({ name: `aidlc-${key}`, version })}\n`,
   );
   writeFileSync(
     join(root, "stages", "construction", "test-pro-stage.md"),
@@ -154,6 +157,55 @@ function withClaudeRegistry(plugins: Record<string, Array<Record<string, unknown
 
 function projectRecord(projectPath: string, installPath: string): Record<string, unknown> {
   return { scope: "project", projectPath, installPath, version: "0.1.0" };
+}
+
+// A Copilot CLI home: config.json is written the way Copilot writes it, with a
+// leading comment; null leaves a file absent, a string is written verbatim.
+function withCopilotHome(
+  config: Record<string, unknown> | string | null,
+  settings: Record<string, unknown> | string | null,
+): string {
+  const home = temp("aidlc-copilot-home-");
+  const write = (name: string, value: Record<string, unknown> | string | null, header: string): void => {
+    if (value === null) return;
+    writeFileSync(
+      join(home, name),
+      typeof value === "string" ? value : `${header}${JSON.stringify(value, null, 2)}\n`,
+    );
+  };
+  write("config.json", config, "// User settings belong in settings.json.\n// This file is managed automatically.\n");
+  write("settings.json", settings, "");
+  process.env.AIDLC_COPILOT_HOME = home;
+  process.env.AIDLC_HARNESS_NAME = "copilot";
+  return home;
+}
+
+function copiedRecord(root: string, key = "test-pro", enabled = true): Record<string, unknown> {
+  return { name: `aidlc-${key}`, marketplace: "org-workflows", enabled, version: "0.1.0", cache_path: root };
+}
+
+// A local directory marketplace listing plugins by relative source, with its
+// manifest where Copilot reads it first after the root.
+function directoryMarketplace(plugins: Record<string, string>): string {
+  const market = temp("aidlc-copilot-market-");
+  mkdirSync(join(market, ".plugin"), { recursive: true });
+  writeFileSync(join(market, ".plugin", "marketplace.json"), JSON.stringify({
+    name: "local-workflows",
+    owner: { name: "fixture" },
+    plugins: Object.entries(plugins).map(([name, root]) => ({
+      name,
+      version: "0.1.0",
+      source: relative(market, root),
+    })),
+  }));
+  return market;
+}
+
+function directorySettings(market: string, enabled: Record<string, boolean>): Record<string, unknown> {
+  return {
+    extraKnownMarketplaces: { "local-workflows": { source: { source: "directory", path: market } } },
+    enabledPlugins: enabled,
+  };
 }
 
 // Merges enabledPlugins into one of Claude Code's project settings layers,
@@ -596,6 +648,96 @@ describe("t242 fixture-proved host inventories", () => {
       ].sort(),
     }]);
   });
+
+  test("Copilot reads copied installs from config.json and live ones through their directory marketplace", () => {
+    const copied = pluginRoot("copilot");
+    const live = pluginRoot("copilot", "0.1.0", "live-flow");
+    const market = directoryMarketplace({ "aidlc-live-flow": live });
+    const home = withCopilotHome(
+      { installedPlugins: [copiedRecord(copied), { name: "spark", marketplace: "copilot-plugins", cache_path: "/x" }] },
+      directorySettings(market, { "aidlc-live-flow@local-workflows": true, "other@local-workflows": true }),
+    );
+    const result = discoverPluginInventory(".aidlc");
+    expect(result).toEqual(expect.objectContaining({
+      capability: "full-inventory",
+      harness: "copilot",
+      source: join(home, "config.json"),
+      invalid: [],
+    }));
+    expect(result.installed).toEqual([
+      expect.objectContaining({ key: "live-flow", root: resolve(live), enabled: true }),
+      expect.objectContaining({ key: "test-pro", root: copied, enabled: true }),
+    ]);
+
+    withCopilotHome(
+      { installedPlugins: [copiedRecord(copied, "test-pro", false)] },
+      directorySettings(market, { "aidlc-live-flow@local-workflows": false }),
+    );
+    expect(discoverPluginInventory(".aidlc").installed).toEqual([
+      expect.objectContaining({ key: "live-flow", enabled: false }),
+      expect.objectContaining({ key: "test-pro", enabled: false }),
+    ]);
+    withCopilotHome(
+      { installedPlugins: [copiedRecord(copied)] },
+      { enabledPlugins: { "aidlc-test-pro@org-workflows": false } },
+    );
+    expect(discoverPluginInventory(".aidlc").installed).toEqual([
+      expect.objectContaining({ key: "test-pro", enabled: false }),
+    ]);
+  });
+
+  test("Copilot without a registry is current-root-only; unreadable enablement falls back; an unreadable registry refuses", () => {
+    process.env.AIDLC_PLUGIN_ROOT = "";
+    process.env.CLAUDE_PLUGIN_ROOT = "";
+    process.env.PLUGIN_ROOT = "";
+    withCopilotHome(null, null);
+    expect(discoverPluginInventory(".aidlc")).toEqual(expect.objectContaining({
+      capability: "current-root-only",
+      harness: "copilot",
+    }));
+    withCopilotHome({ installedPlugins: [] }, "{not-json");
+    expect(discoverPluginInventory(".aidlc").capability).toBe("current-root-only");
+    withCopilotHome({ installedPlugins: [] }, { enabledPlugins: [] });
+    expect(discoverPluginInventory(".aidlc").capability).toBe("current-root-only");
+    const home = withCopilotHome("// managed\n{not-json", { enabledPlugins: {} });
+    expect(discoverPluginInventory(".aidlc")).toEqual(expect.objectContaining({
+      capability: "full-inventory",
+      installed: [],
+      invalid: [expect.objectContaining({
+        paths: [join(home, "config.json")],
+        message: expect.stringContaining("invalid Copilot plugin registry"),
+      })],
+    }));
+  });
+
+  test("a live Copilot entry its marketplace no longer lists needs attention only while enabled", () => {
+    const market = directoryMarketplace({});
+    withCopilotHome(null, directorySettings(market, { "aidlc-gone@local-workflows": false }));
+    expect(discoverPluginInventory(".aidlc")).toEqual(expect.objectContaining({ installed: [], invalid: [] }));
+    withCopilotHome(null, directorySettings(market, { "aidlc-gone@local-workflows": true }));
+    expect(discoverPluginInventory(".aidlc").invalid).toEqual([
+      expect.objectContaining({
+        key: "gone",
+        message: 'Copilot plugin "aidlc-gone@local-workflows" is enabled but its directory marketplace does not list it',
+      }),
+    ]);
+  });
+
+  test("a Copilot project reads Copilot's registry, not Claude's, without AIDLC_HARNESS_NAME", () => {
+    const project = temp("aidlc-copilot-project-");
+    mkdirSync(join(project, ".aidlc", "tools", "data"), { recursive: true });
+    writeFileSync(
+      join(project, ".aidlc", "tools", "data", "harness.json"),
+      JSON.stringify({ name: "copilot", harnessDir: ".aidlc" }),
+    );
+    withClaudeFixture(pluginRoot());
+    withCopilotHome({ installedPlugins: [copiedRecord(pluginRoot("copilot", "0.1.0", "copilot-flow"))] }, null);
+    delete process.env.AIDLC_HARNESS_NAME;
+    delete process.env.AIDLC_HARNESS_DIR;
+    const result = discoverPluginInventory(".aidlc", project);
+    expect(result.harness).toBe("copilot");
+    expect(result.installed).toEqual([expect.objectContaining({ key: "copilot-flow" })]);
+  });
 });
 
 describe("t242 pure status comparator", () => {
@@ -713,6 +855,21 @@ describe("t242 transactional sync and ownership-safe prune", () => {
       .toBe(false);
     expect(collectPluginStatus(project, ".claude").statuses).toEqual([
       expect.objectContaining({ key: "test-pro", state: "installed-disabled" }),
+    ]);
+  }, 60_000);
+
+  test("a manual sync in a Copilot project composes what Copilot has installed", async () => {
+    const project = temp("aidlc-plugin-copilot-project-");
+    cpSync(join(REPO_ROOT, "dist", "copilot"), project, { recursive: true });
+    withCopilotHome({ installedPlugins: [copiedRecord(join(REPO_ROOT, "dist", "plugins", "test-pro", "copilot"))] }, null);
+    delete process.env.AIDLC_HARNESS_NAME;
+    delete process.env.AIDLC_HARNESS_DIR;
+    for (const key of ["AIDLC_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"]) process.env[key] = "";
+
+    expect((await syncPlugins(project, [], ".aidlc")).synced).toEqual(["test-pro"]);
+    expect(existsSync(join(project, ".aidlc", "tools", "data", "plugin-compose-test-pro.json"))).toBe(true);
+    expect(collectPluginStatus(project, ".aidlc").statuses).toEqual([
+      expect.objectContaining({ key: "test-pro", state: "current" }),
     ]);
   }, 60_000);
 

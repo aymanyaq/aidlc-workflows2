@@ -26,6 +26,7 @@ import {
   aidlcInvocation,
   compiledExecutable,
   runtimeHarnessDir,
+  runtimeHarnessName,
 } from "./aidlc-runtime-paths.ts";
 import {
   executePlan,
@@ -261,8 +262,14 @@ function currentRoots(): string[] {
   ].map((value) => value?.trim() ?? "").filter(Boolean).map(absolute))];
 }
 
-function harnessKind(harnessDir = runtimeHarnessDir()): PluginInventory["harness"] {
-  const declared = process.env.AIDLC_HARNESS_NAME?.trim();
+// The installed harness.json names the harness, so Copilot and OpenCode, which
+// share .aidlc, are told apart without AIDLC_HARNESS_NAME; the directory only
+// decides when no install metadata is readable.
+function harnessKind(
+  harnessDir = runtimeHarnessDir(),
+  projectDir = resolveProjectDir(),
+): PluginInventory["harness"] {
+  const declared = runtimeHarnessName(projectDir, harnessDir);
   if (
     declared === "claude" ||
     declared === "codex" ||
@@ -563,13 +570,161 @@ function codexInventory(): PluginInventory {
   };
 }
 
+// Copilot CLI reads a local directory marketplace's manifest from the first of
+// these that exists.
+const COPILOT_MARKETPLACE_MANIFESTS = [
+  "marketplace.json",
+  join(".plugin", "marketplace.json"),
+  join(".github", "plugin", "marketplace.json"),
+  join(".claude-plugin", "marketplace.json"),
+];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readJsonc(path: string): unknown {
+  return Bun.JSONC.parse(readFileSync(path, "utf-8")) as unknown;
+}
+
+// Copilot CLI installs plugins per user, in one of two ways. A plugin installed
+// from a git or GitHub marketplace is copied and recorded in config.json
+// installedPlugins with its cache_path. One installed from a local directory
+// marketplace is loaded live from that directory and recorded only in
+// settings.json: an enabledPlugins entry whose marketplace is a directory
+// source in extraKnownMarketplaces. enabledPlugins false disables either kind,
+// and a disabled live entry that no longer resolves is not an install.
+function copilotInventory(): PluginInventory {
+  const copilotHome = absolute(
+    process.env.AIDLC_COPILOT_HOME ?? process.env.COPILOT_HOME ?? join(homedir(), ".copilot"),
+  );
+  const configPath = join(copilotHome, "config.json");
+  const settingsPath = join(copilotHome, "settings.json");
+  if (!existsSync(configPath) && !existsSync(settingsPath)) return currentRootInventory("copilot");
+  let settings: Record<string, unknown> = {};
+  if (existsSync(settingsPath)) {
+    let parsed: unknown;
+    try {
+      parsed = readJsonc(settingsPath);
+    } catch {
+      return currentRootInventory("copilot");
+    }
+    if (!isRecord(parsed)) return currentRootInventory("copilot");
+    settings = parsed;
+  }
+  if (settings.enabledPlugins !== undefined && !isRecord(settings.enabledPlugins)) {
+    return currentRootInventory("copilot");
+  }
+  const enabledPlugins = (settings.enabledPlugins ?? {}) as Record<string, unknown>;
+  const installed: InstalledPlugin[] = [];
+  const invalid: InvalidInstalledPlugin[] = [];
+  const add = (
+    entry: InstalledPlugin | InvalidInstalledPlugin,
+    name: string,
+  ): void => {
+    if ("root" in entry) installed.push(entry);
+    else invalid.push({ ...entry, key: name.slice("aidlc-".length) });
+  };
+
+  let records: unknown = [];
+  if (existsSync(configPath)) {
+    let config: unknown;
+    try {
+      config = readJsonc(configPath);
+    } catch (error) {
+      return {
+        capability: "full-inventory",
+        harness: "copilot",
+        source: configPath,
+        installed,
+        invalid: [{ paths: [configPath], message: `invalid Copilot plugin registry: ${errorMessage(error)}` }],
+      };
+    }
+    records = isRecord(config) ? config.installedPlugins ?? [] : null;
+  }
+  const recorded = new Set<string>();
+  if (!Array.isArray(records)) {
+    invalid.push({ paths: [configPath], message: "Copilot installedPlugins must be an array" });
+  } else {
+    for (const raw of records) {
+      if (!isRecord(raw)) {
+        invalid.push({ paths: [configPath], message: "Copilot installedPlugins has an invalid record" });
+        continue;
+      }
+      const name = typeof raw.name === "string" ? raw.name : "";
+      if (!name.startsWith("aidlc-")) continue;
+      const id = typeof raw.marketplace === "string" && raw.marketplace
+        ? `${name}@${raw.marketplace}`
+        : name;
+      recorded.add(id);
+      const root = typeof raw.cache_path === "string" ? raw.cache_path : "";
+      if (!root) {
+        add({ paths: [configPath], message: `Copilot plugin "${id}" has no cache_path` }, name);
+        continue;
+      }
+      const enabled = raw.enabled !== false && enabledPlugins[id] !== false;
+      const version = typeof raw.version === "string" ? raw.version : undefined;
+      add(invalidFromRoot(root, "copilot", enabled, version), name);
+    }
+  }
+
+  const marketplaces = isRecord(settings.extraKnownMarketplaces)
+    ? settings.extraKnownMarketplaces
+    : {};
+  for (const [id, value] of Object.entries(enabledPlugins).sort(([a], [b]) => a.localeCompare(b))) {
+    const at = id.lastIndexOf("@");
+    const name = at > 0 ? id.slice(0, at) : "";
+    if (!name.startsWith("aidlc-") || recorded.has(id)) continue;
+    const marketplace = marketplaces[id.slice(at + 1)];
+    const source = isRecord(marketplace) && isRecord(marketplace.source) ? marketplace.source : null;
+    // Only a directory marketplace installs live; any other enabledPlugins
+    // entry names a copy that config.json would have recorded.
+    if (source?.source !== "directory" || typeof source.path !== "string") continue;
+    const directory = absolute(source.path);
+    const manifest = COPILOT_MARKETPLACE_MANIFESTS.map((path) => join(directory, path)).find(existsSync);
+    let listed: unknown;
+    try {
+      const catalog = manifest ? readJsonc(manifest) : null;
+      listed = isRecord(catalog) && Array.isArray(catalog.plugins)
+        ? catalog.plugins.find((plugin) => isRecord(plugin) && plugin.name === name)
+        : undefined;
+    } catch (error) {
+      if (value !== false) {
+        add({ paths: [manifest as string], message: `invalid Copilot marketplace manifest: ${errorMessage(error)}` }, name);
+      }
+      continue;
+    }
+    const pluginSource = isRecord(listed) && typeof listed.source === "string" ? listed.source : "";
+    if (!pluginSource) {
+      if (value !== false) {
+        add({
+          paths: [manifest ?? directory],
+          message: `Copilot plugin "${id}" is enabled but its directory marketplace does not list it`,
+        }, name);
+      }
+      continue;
+    }
+    add(invalidFromRoot(resolve(directory, pluginSource), "copilot", value !== false), name);
+  }
+
+  const normalized = deduplicateInventory(installed, invalid);
+  return {
+    capability: "full-inventory",
+    harness: "copilot",
+    source: configPath,
+    installed: normalized.installed,
+    invalid: normalized.invalid,
+  };
+}
+
 export function discoverPluginInventory(
   harnessDir = runtimeHarnessDir(),
   projectDir = resolveProjectDir(),
 ): PluginInventory {
-  const harness = harnessKind(harnessDir);
+  const harness = harnessKind(harnessDir, projectDir);
   if (harness === "claude") return claudeInventory(projectDir);
   if (harness === "codex") return codexInventory();
+  if (harness === "copilot") return copilotInventory();
   return currentRootInventory(harness);
 }
 
@@ -1350,7 +1505,7 @@ export async function syncPlugins(
   harnessDir = runtimeHarnessDir(projectDir),
   lockRetry = 0,
 ): Promise<{ synced: string[]; pruned: string[]; operations: number }> {
-  const harness = harnessKind(harnessDir);
+  const harness = harnessKind(harnessDir, projectDir);
   const inventory = currentRoots().length > 0
     ? currentRootInventory(harness)
     : discoverPluginInventory(harnessDir, projectDir);
