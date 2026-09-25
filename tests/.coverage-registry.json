@@ -12484,6 +12484,10 @@
         {
           "file": "tests/unit/t17.test.ts",
           "mechanism": "cli"
+        },
+        {
+          "file": "tests/unit/t332-summary-authorization.test.ts",
+          "mechanism": "cli"
         }
       ],
       "status": "covered"

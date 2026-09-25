@@ -198,6 +198,32 @@ then use the ignored local `dist/copilot/` output.
   the CLI reads `~/.copilot/mcp-config.json`, VS Code reads `.vscode/mcp.json`;
   the conductor can use them, but delegated worker personas cannot.
 
+## Installing AIDLC workflows (plugins)
+
+Workflows beyond the core lifecycle, such as an AI use-case assessment, ship
+as AIDLC plugins published through a Copilot marketplace. Each user adds the
+marketplace once and installs the workflows they need:
+
+```bash
+copilot plugin marketplace add <your-org>/<catalogue-repo>
+copilot plugin install aidlc-<workflow>@<marketplace>
+```
+
+Copilot installs plugins per user, not per project. In a trusted AIDLC project,
+each installed workflow's SessionStart hook composes it when a session starts.
+The engine also reads Copilot's own install records (`~/.copilot`, or
+`COPILOT_HOME`), so outside a session:
+
+```bash
+aidlc engine plugin list                 # installed vs composed, per workflow
+aidlc engine plugin sync                 # compose every installed workflow now
+aidlc engine plugin select aidlc,aiu     # choose the workflows active in this project
+```
+
+A copy-channel install runs the same routes as `bun .aidlc/tools/aidlc.ts
+engine plugin ...`. To publish several workflows as one marketplace, see
+[Authoring a Plugin: Publishing several workflows as one catalogue](../../harness-engineering/10-authoring-a-plugin.md#publishing-several-workflows-as-one-catalogue).
+
 ## Verify
 
 ```bash

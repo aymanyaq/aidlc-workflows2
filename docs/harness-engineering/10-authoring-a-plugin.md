@@ -367,6 +367,52 @@ first-party `dist/plugins/<name>/<harness>/` trees, so its byte-parity guard als
 guards external builds. Publish the output to a git repo with semver tags and a
 `marketplace.json`; teams then install through the host's native commands.
 
+### Publishing several workflows as one catalogue
+
+A team that ships more than one workflow publishes them as one marketplace, so
+each user adds it once and installs only the workflows they need:
+
+```bash
+bun <tools-dir>/aidlc-plugin-catalog.ts <out-dir> <plugin-root>... \
+  [--harness copilot,claude] [--name aidlc-workflows] [--owner "<team>"] [--json]
+```
+
+The catalogue tool validates every plugin first and writes nothing if one fails
+or two share a name. It builds each plugin with the same emitter as
+`aidlc-plugin-build.ts`, so every projection under
+`<out-dir>/<harness>/<plugin>/` is byte-identical to a single build. It then
+writes one marketplace manifest per harness, in that harness's plugin manifest
+directory: `.plugin/marketplace.json` for Copilot and
+`.claude-plugin/marketplace.json` for Claude Code. It writes no root
+`marketplace.json`, because Copilot reads that ahead of both. `--harness`
+defaults to `copilot`; Copilot and Claude are the harnesses whose marketplace
+format is proved. Re-running over the same directory replaces it (the directory
+carries `.aidlc-plugin-catalog.json`), and any other non-empty directory is
+refused. Commit the output to a git repository and tag releases, or share the
+directory.
+
+### Copilot CLI (host store)
+
+```bash
+# each user, once:
+copilot plugin marketplace add <your-org>/<catalogue-repo>
+# once per workflow they need:
+copilot plugin install aidlc-aiu@aidlc-workflows
+copilot plugin install aidlc-vdd@aidlc-workflows
+```
+
+Copilot installs plugins per user, not per project. In each AIDLC Copilot
+project, every installed workflow's SessionStart hook composes it when a session
+starts, and `aidlc engine plugin select` chooses which workflows are active in
+that project. Trust each AIDLC project folder (`trustedFolders` in
+`~/.copilot/config.json`): the engine's own hooks run only there. Outside a
+session, `aidlc engine plugin list|sync`
+and doctor read Copilot's own install records (`$COPILOT_HOME`, default
+`~/.copilot`), so one manual `sync` composes every installed workflow. A
+marketplace added from a local directory installs live rather than copied:
+edits to that directory take effect on the next session, which suits authoring;
+teams should install from the git repository.
+
 ### Claude / Codex (host store)
 
 ```bash
@@ -444,6 +490,9 @@ AIDLC_PLUGIN_ROOT="<plugin-root>" AIDLC_PROJECT_DIR="<project>" \
 Trust is **host-native** — you don't build anything:
 - Claude: org admin sets `strictKnownMarketplaces` (managed, unoverridable).
 - Codex: one-time trust prompt per plugin, content-hash-pinned.
+- Copilot: the user installs each plugin, and the engine's repository hooks
+  run only in folders the user trusted (`trustedFolders` in
+  `~/.copilot/config.json`); `/aidlc --doctor` reports an untrusted project.
 - Kiro: n/a (folder-drop, no host gate).
 
 > **Concrete examples** — `plugin.json`, `marketplace.json`,
