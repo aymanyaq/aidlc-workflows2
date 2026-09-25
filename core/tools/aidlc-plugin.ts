@@ -22,6 +22,7 @@ import {
   resolveProjectDir,
 } from "./aidlc-lib.ts";
 import {
+  aidlcInvocation,
   compiledExecutable,
   runtimeHarnessDir,
 } from "./aidlc-runtime-paths.ts";
@@ -765,7 +766,7 @@ export function collectPluginStatus(
 
 function humanAction(status: PluginStatus): string {
   if (status.action === "current") return "current";
-  if (status.action === "sync") return "run: aidlc config";
+  if (status.action === "sync") return `run: ${aidlcInvocation()} config`;
   return `needs attention: ${status.message}`;
 }
 

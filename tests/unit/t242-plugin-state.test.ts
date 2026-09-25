@@ -29,6 +29,7 @@ import {
   type PluginInventory,
   type ProjectEvidence,
 } from "../../core/tools/aidlc-plugin.ts";
+import { aidlcInvocation } from "../../core/tools/aidlc-runtime-paths.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const FIXTURES = join(REPO_ROOT, "tests", "fixtures", "plugin-inventory");
@@ -481,7 +482,7 @@ describe("t242 pure status comparator", () => {
     );
     const rendered = renderPluginStatuses(rows);
     expect(rendered).toContain("current");
-    expect(rendered).toContain("run: aidlc config");
+    expect(rendered).toContain(`run: ${aidlcInvocation()} config`);
     expect(rendered).toContain("needs attention: invalid manifest");
     expect(rendered).not.toContain("[source-changed]");
     expect(renderPluginStatuses(rows, true)).toContain("[source-changed]");
@@ -566,6 +567,21 @@ describe("t242 transactional sync and ownership-safe prune", () => {
     expect(JSON.parse(list.stdout).data.statuses).toEqual([
       expect.objectContaining({ key: "test-pro", state: "not-composed", action: "sync" }),
     ]);
+
+    const table = spawnSync(process.execPath, [
+      join(REPO_ROOT, "core", "tools", "aidlc.ts"),
+      "engine",
+      "plugin",
+      "list",
+      "--project-dir",
+      project,
+    ], {
+      cwd: project,
+      encoding: "utf-8",
+      env: process.env,
+    });
+    expect(table.status, table.stdout + table.stderr).toBe(0);
+    expect(table.stdout).toContain("run: bun .claude/tools/aidlc.ts config");
 
     const doctor = spawnSync(process.execPath, [
       join(REPO_ROOT, "core", "tools", "aidlc.ts"),
