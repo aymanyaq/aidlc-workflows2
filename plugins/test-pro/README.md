@@ -42,14 +42,14 @@ bun <tools-dir>/aidlc-plugin-test.ts . --install <claude-project> --harness clau
 **Claude Code** (host store):
 ```
 /plugin marketplace add <your-repo-or-path>/dist/plugins/test-pro/claude
-/plugin install aidlc-test-pro@aidlc-plugins
-# start a fresh session → the SessionStart hook composes test-pro in
+/plugin install aidlc-test-pro@aidlc-test-pro
+# start a fresh session → the SessionStart hook composes and activates test-pro
 ```
 
 **Codex CLI** (host store, in a git repo):
 ```
 codex plugin marketplace add <…>/dist/plugins/test-pro/codex
-codex plugin add aidlc-test-pro@aidlc-plugins   # approve the one-time hook trust
+codex plugin add aidlc-test-pro@aidlc-test-pro   # approve the one-time hook trust
 ```
 
 **Kiro** (no store — folder-drop + compose):
