@@ -612,6 +612,30 @@ describe("t242 fixture-proved host inventories", () => {
     expect(discoverPluginInventory(".claude")).toEqual(expect.objectContaining(expected));
   });
 
+  test("Claude composes a directory-marketplace plugin from its folder, not the stale cache copy", () => {
+    const market = temp("aidlc-claude-market-");
+    const live = join(market, "workflow");
+    cpSync(pluginRoot("claude", "0.2.0"), live, { recursive: true });
+    mkdirSync(join(market, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(market, ".claude-plugin", "marketplace.json"), JSON.stringify({
+      name: "local-workflows",
+      owner: { name: "fixture" },
+      plugins: [{ name: "aidlc-test-pro", source: "./workflow" }],
+    }));
+    const cache = pluginRoot("claude", "0.1.0");
+    withClaudeRegistry({
+      "aidlc-test-pro@local-workflows": [{ scope: "user", installPath: cache, version: "0.1.0" }],
+    });
+    const registry = process.env.AIDLC_CLAUDE_PLUGIN_REGISTRY as string;
+    writeFileSync(
+      join(registry, "..", "known_marketplaces.json"),
+      JSON.stringify({ "local-workflows": { source: { source: "directory", path: market } } }),
+    );
+    const result = discoverPluginInventory(".claude", temp("aidlc-claude-live-project-"));
+    expect(result.invalid).toEqual([]);
+    expect(result.installed).toEqual([expect.objectContaining({ key: "test-pro", version: "0.2.0", root: live })]);
+  });
+
   test("Claude records that resolve to one manifest are one install", () => {
     const root = pluginRoot();
     const current = temp("aidlc-claude-current-");
@@ -1216,6 +1240,27 @@ describe("t242 transactional sync and ownership-safe prune", () => {
       }),
     ]);
   }, 60_000);
+
+  test("installing a changed plugin again takes out what it no longer contributes", async () => {
+    const project = installedProject();
+    const root = temp("aidlc-plugin-reinstall-");
+    cpSync(TEST_PRO, root, { recursive: true });
+    withClaudeFixture(root);
+    await syncPlugins(project, [], ".claude");
+    const stock = readFileSync(
+      join(REPO_ROOT, "dist", "claude", ".claude", "aidlc-common", "stages", "construction", "build-and-test.md"),
+      "utf-8",
+    );
+    expect(buildAndTest(project)).not.toBe(stock);
+
+    rmSync(join(root, "contributions", "construction", "build-and-test.md"));
+    const second = await syncPlugins(project, [], ".claude");
+    expect(second.operations).toBeGreaterThan(0);
+    expect(buildAndTest(project)).toBe(stock);
+    expect(collectPluginStatus(project, ".claude").statuses).toEqual([
+      expect.objectContaining({ key: "test-pro", state: "current" }),
+    ]);
+  }, 90_000);
 
   test("same-version source drift replaces prior hash-proven primitive files", async () => {
     const project = installedProject();

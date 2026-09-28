@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
@@ -418,6 +418,58 @@ function claudeRecordAppliesToProject(
     canonicalPath(entry.projectPath) === canonicalPath(projectDir);
 }
 
+// A plugin from a directory marketplace loads from that folder: Claude Code
+// takes edits there at the next session start, while its registry still names
+// the cache copy made at install. So the folder is what a session composes,
+// and rebuilding a workflow in place then installing it again needs nothing
+// more. The marketplace comes from the project's settings (local over
+// project), then the user's known_marketplaces.json beside the registry.
+function claudeDirectoryPluginRoot(
+  id: string,
+  projectDir: string,
+  registryPath: string,
+): string | null {
+  const at = id.lastIndexOf("@");
+  if (at <= 0) return null;
+  const pluginName = id.slice(0, at);
+  const marketplace = id.slice(at + 1);
+  const readObject = (path: string): Record<string, unknown> | null => {
+    try {
+      const value = readJson(path);
+      return value && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const settingsDir = join(absolute(projectDir), ".claude");
+  const candidates: unknown[] = [];
+  for (const layer of ["settings.local.json", "settings.json"]) {
+    const extra = readObject(join(settingsDir, layer))?.extraKnownMarketplaces;
+    if (extra && typeof extra === "object") candidates.push((extra as Record<string, unknown>)[marketplace]);
+  }
+  candidates.push(readObject(join(dirname(registryPath), "known_marketplaces.json"))?.[marketplace]);
+  for (const candidate of candidates) {
+    const source = candidate && typeof candidate === "object"
+      ? (candidate as Record<string, unknown>).source
+      : null;
+    if (!source || typeof source !== "object") continue;
+    const { source: kind, path } = source as Record<string, unknown>;
+    if (kind !== "directory" || typeof path !== "string" || path === "") continue;
+    const folder = isAbsolute(path) ? path : resolve(projectDir, path);
+    const listing = readObject(join(folder, ".claude-plugin", "marketplace.json"))?.plugins;
+    if (!Array.isArray(listing)) return null;
+    const entry = listing.find((plugin) =>
+      plugin && typeof plugin === "object" && (plugin as Record<string, unknown>).name === pluginName
+    ) as Record<string, unknown> | undefined;
+    if (!entry || typeof entry.source !== "string") return null;
+    const root = resolve(folder, entry.source);
+    return existsSync(join(root, ".claude-plugin", "plugin.json")) ? root : null;
+  }
+  return null;
+}
+
 function claudeInventory(projectDir: string): PluginInventory {
   const registryPath = absolute(
     process.env.AIDLC_CLAUDE_PLUGIN_REGISTRY ??
@@ -467,8 +519,11 @@ function claudeInventory(projectDir: string): PluginInventory {
         }
         const entry = rawEntry as Record<string, unknown>;
         if (!claudeRecordAppliesToProject(entry, projectDir)) continue;
-        const root = typeof entry.installPath === "string" ? entry.installPath : "";
-        const version = typeof entry.version === "string" ? entry.version : undefined;
+        const live = claudeDirectoryPluginRoot(id, projectDir, registryPath);
+        const root = live ?? (typeof entry.installPath === "string" ? entry.installPath : "");
+        // The folder's own manifest is authoritative for a live plugin; the
+        // registry's version is the one it had at install.
+        const version = live ? undefined : typeof entry.version === "string" ? entry.version : undefined;
         if (!root) {
           invalid.push({ paths: [registryPath], message: `Claude plugin "${id}" has no installPath` });
           continue;

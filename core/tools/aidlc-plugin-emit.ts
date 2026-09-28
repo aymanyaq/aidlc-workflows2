@@ -658,7 +658,7 @@ export function buildPluginProjection(
         join(hostManifestDir, "marketplace.json"),
         `${JSON.stringify(
           {
-            name: "aidlc-plugins",
+            name: `aidlc-${pluginName}`,
             owner: author,
             description: "AIDLC plugin catalogue.",
             plugins: [

@@ -401,7 +401,8 @@ configure it.
 The shipped builder emits your plugin as **a real host plugin** for one harness
 at a time, including `.claude-plugin/plugin.json`,
 `.codex-plugin/plugin.json`, Copilot's `.plugin/plugin.json`, and Kiro's folder
-projection:
+projection, each beside a one-plugin marketplace named `aidlc-<name>` (unique
+per plugin, so a user can add several):
 
 ```bash
 bun <tools-dir>/aidlc-plugin-build.ts <plugin-root> <harness> [outDir]
@@ -463,13 +464,17 @@ teams should install from the git repository.
 ### Claude / Codex (host store)
 
 ```bash
-# teams run these in their host CLI:
+# teams run these in their host CLI, inside the project:
 /plugin marketplace add <your-org>/<your-plugin-repo>    # Claude
-/plugin install test-pro@<marketplace>                   # Claude
+/plugin install aidlc-test-pro@aidlc-test-pro            # Claude (choose project scope)
 
 codex plugin marketplace add <your-org>/<your-plugin-repo>   # Codex
-codex plugin add test-pro@<marketplace>                      # Codex
+codex plugin add aidlc-test-pro@aidlc-test-pro               # Codex
 ```
+
+Install at project scope in each project that runs the workflow; installing
+it again in the same project is harmless. A user-scope install is active in
+every AIDLC project.
 
 A **SessionStart hook** (bundled in the emitted plugin) calls the same
 transactional sync implementation as `aidlc engine plugin sync` for its injected
