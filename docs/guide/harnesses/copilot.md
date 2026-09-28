@@ -215,15 +215,18 @@ copilot plugin install aidlc-<workflow>@<marketplace>
 ```
 
 Copilot installs plugins per user, not per project. In a trusted AIDLC project,
-each installed workflow's SessionStart hook composes it when a session starts.
-The engine also reads Copilot's own install records (`~/.copilot`, or
-`COPILOT_HOME`), so outside a session:
+each installed workflow's SessionStart hook composes and activates it when a
+session starts; there is nothing to enable. Each workflow runs through its own
+command, so several sit side by side. The engine also reads Copilot's own
+install records (`~/.copilot`, or `COPILOT_HOME`), so outside a session:
 
 ```bash
 aidlc engine plugin list                 # installed vs composed, per workflow
 aidlc engine plugin sync                 # compose every installed workflow now
-aidlc engine plugin select aidlc,aiu     # choose the workflows active in this project
 ```
+
+To take a workflow out, `copilot plugin disable` or `uninstall` it, then run
+`aidlc engine plugin sync`, which deactivates it in the project.
 
 A copy-channel install runs the same routes as `bun .aidlc/tools/aidlc.ts
 engine plugin ...`. To publish several workflows as one marketplace, see

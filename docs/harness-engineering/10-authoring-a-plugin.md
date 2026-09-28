@@ -448,9 +448,10 @@ copilot plugin install aidlc-vdd@aidlc-workflows
 ```
 
 Copilot installs plugins per user, not per project. In each AIDLC Copilot
-project, every installed workflow's SessionStart hook composes it when a session
-starts, and `aidlc engine plugin select` chooses which workflows are active in
-that project. Trust each AIDLC project folder (`trustedFolders` in
+project, every installed workflow's SessionStart hook composes and activates it
+when a session starts; each workflow runs through its own command, so they sit
+side by side. `copilot plugin disable` or `uninstall` takes one out, and the
+next `aidlc engine plugin sync` deactivates it. Trust each AIDLC project folder (`trustedFolders` in
 `~/.copilot/config.json`): the engine's own hooks run only there. Outside a
 session, `aidlc engine plugin list|sync`
 and doctor read Copilot's own install records (`$COPILOT_HOME`, default
@@ -487,25 +488,30 @@ records. `--prune-missing` is intentionally stricter: it requires a proved full
 host inventory, explicit confirmation (`--yes` in automation), and unchanged
 owned hashes; local or unowned bytes are refused.
 
-### Project selection
+### Activation follows the host
 
-Composition installs a plugin's bytes; selection controls which installed
-stages, scopes, runners, and contributions are active:
+There is nothing to enable or disable in AIDLC. A plugin the host has installed
+and enabled for the project is active: its session-start compose (or
+`aidlc engine plugin sync`) adds it to `harness.json` `plugins` when the
+project has that list, and merges its contributions. Disable or uninstall it
+in the host, then run `aidlc engine plugin sync`: sync deselects every plugin
+the host no longer enables, strips what it merged into other stages, and
+keeps its files so a reinstall restores it byte-identical. A plugin a running workflow still uses stays active until the
+workflow finishes. Installing a changed version again, in the same project,
+replaces the previous composition, including anything the new version no
+longer ships.
 
 ```bash
-aidlc engine plugin select aidlc,test-pro
-aidlc engine plugin list
-aidlc engine plugin sync
+aidlc engine plugin list     # installed versus composed, and what a sync would change
+aidlc engine plugin sync     # compose, activate, deactivate
 ```
 
-`plugin select` stages disabled-contribution removal, graph/grid compilation,
-runners, and generated tables before committing one project transaction;
-re-enabled contributions return on the next SessionStart sync. It refuses to
-disable a plugin needed by an active workflow. The
-`PLUGIN_SELECTION_CHANGED` audit append is part of committed validation, so an
-audit failure rolls the whole selection back. `plugin list` is different: it
-compares host inventory with composition/ownership stamps and does not change
-selection.
+`aidlc engine plugin select` remains only for core's own workflow: `select
+<plugin>` leaves just the plugin workflows active (a project that runs nothing
+else), and `select aidlc,<plugin>` brings core back. It refuses to turn off a
+plugin the host keeps enabled and names the host command that does. Every
+selection change is one project transaction whose committed validator is the
+`PLUGIN_SELECTION_CHANGED` audit row.
 
 ### Kiro (no store — folder-drop, then run the composer explicitly)
 

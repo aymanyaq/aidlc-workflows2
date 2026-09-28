@@ -21,6 +21,7 @@ import {
   comparePluginState,
   confirmPrune,
   discoverPluginInventory,
+  hostSelection,
   normalizeInstalledPlugin,
   pluginSourceHash,
   renderPluginStatuses,
@@ -803,6 +804,36 @@ describe("t242 pure status comparator", () => {
     expect(renderPluginStatuses(rows, true)).toContain("[source-changed]");
   });
 
+  test("the host decides what is active: installed means active, removed means inactive", () => {
+    const rows = comparePluginState(
+      inventory([
+        installed("deselected", "1.0.0", "sha256:a"),
+        installed("off", "1.0.0", "sha256:b", false),
+      ]),
+      evidence([
+        stamp("deselected", "1.0.0", "sha256:a"),
+        stamp("off", "1.0.0", "sha256:b"),
+        stamp("gone", "1.0.0", "sha256:c"),
+        stamp("left", "1.0.0", "sha256:d"),
+      ]),
+      new Set(["aidlc", "off", "gone"]),
+    );
+    expect(Object.fromEntries(rows.map((row) => [row.key, [row.state, row.action]]))).toEqual({
+      deselected: ["not-active", "sync"],
+      off: ["installed-disabled", "sync"],
+      gone: ["installed-missing", "sync"],
+      left: ["installed-missing", "current"],
+    });
+  });
+
+  test("hostSelection adds what the host enables and drops only what it removed", () => {
+    expect(hostSelection(null, ["aidlc", "a"], ["a"], [])).toBeNull();
+    expect(hostSelection(null, ["aidlc", "a", "b"], ["a"], ["b"])).toEqual(["a", "aidlc"]);
+    expect(hostSelection(new Set(["a"]), ["aidlc", "a"], ["a", "b"], [])).toEqual(["a", "b"]);
+    expect(hostSelection(new Set(["aidlc", "a"]), ["aidlc", "a"], ["a"], [])).toBeNull();
+    expect(hostSelection(new Set(["aidlc", "a"]), ["aidlc", "a"], [], ["a"])).toEqual(["aidlc"]);
+  });
+
   test("current-root-only never infers disabled or missing aggregate state", () => {
     const rows = comparePluginState({
       capability: "current-root-only",
@@ -856,6 +887,140 @@ describe("t242 transactional sync and ownership-safe prune", () => {
     expect(collectPluginStatus(project, ".claude").statuses).toEqual([
       expect.objectContaining({ key: "test-pro", state: "installed-disabled" }),
     ]);
+  }, 60_000);
+
+  function harnessJson(project: string): Record<string, unknown> {
+    return JSON.parse(readFileSync(join(project, ".claude", "tools", "data", "harness.json"), "utf-8"));
+  }
+
+  function stageNode(project: string, slug: string): Record<string, unknown> | undefined {
+    const graph = JSON.parse(
+      readFileSync(join(project, ".claude", "tools", "data", "stage-graph.json"), "utf-8"),
+    ) as Array<Record<string, unknown>>;
+    return graph.find((node) => node.slug === slug);
+  }
+
+  function buildAndTest(project: string): string {
+    return readFileSync(
+      join(project, ".claude", "aidlc-common", "stages", "construction", "build-and-test.md"),
+      "utf-8",
+    );
+  }
+
+  function auditMentions(project: string, text: string): boolean {
+    const root = join(project, "aidlc");
+    if (!existsSync(root)) return false;
+    return Object.entries(surfaceSnapshot(root)).some(([, bytes]) =>
+      Buffer.from(bytes, "base64").toString("utf-8").includes(text)
+    );
+  }
+
+  test("installing a plugin activates it in a project that names its plugins", async () => {
+    const project = installedProject();
+    const data = harnessJson(project);
+    writeFileSync(
+      join(project, ".claude", "tools", "data", "harness.json"),
+      `${JSON.stringify({ ...data, plugins: ["aidlc"] }, null, 2)}\n`,
+    );
+    withClaudeFixture(TEST_PRO);
+
+    const result = await syncPlugins(project, [], ".claude");
+    expect(result.activated).toEqual(["test-pro"]);
+    expect(harnessJson(project).plugins).toEqual(["aidlc", "test-pro"]);
+    expect(stageNode(project, "test-pro-integration")?.enabled).toBeUndefined();
+    expect(buildAndTest(project)).toContain("Step 8a (test-pro)");
+    expect(existsSync(join(project, ".claude", "skills", "test-pro-integration", "SKILL.md"))).toBe(true);
+    expect(auditMentions(project, "PLUGIN_SELECTION_CHANGED")).toBe(true);
+    expect(collectPluginStatus(project, ".claude").statuses).toEqual([
+      expect.objectContaining({ key: "test-pro", state: "current", action: "current" }),
+    ]);
+    expect((await syncPlugins(project, [], ".claude")).operations).toBe(0);
+  }, 60_000);
+
+  test("a plugin the host disables leaves the project at the next sync and returns when enabled", async () => {
+    const project = installedProject();
+    withClaudeFixture(TEST_PRO);
+    await syncPlugins(project, [], ".claude");
+    const composed = buildAndTest(project);
+    expect(composed).toContain("Step 8a (test-pro)");
+
+    claudeProjectEnablement(project, "settings.json", { "aidlc-test-pro@fixture-marketplace": false });
+    expect(collectPluginStatus(project, ".claude").statuses).toEqual([
+      expect.objectContaining({ key: "test-pro", state: "installed-disabled", action: "sync" }),
+    ]);
+    const off = await syncPlugins(project, [], ".claude");
+    expect(off.deactivated).toEqual(["test-pro"]);
+    expect(harnessJson(project).plugins).toContain("aidlc");
+    expect(harnessJson(project).plugins).not.toContain("test-pro");
+    expect(buildAndTest(project)).not.toContain("test-pro");
+    expect(stageNode(project, "test-pro-integration")?.enabled).toBe(false);
+    expect(existsSync(join(project, ".claude", "aidlc-common", "stages", "construction", "test-pro-integration.md")))
+      .toBe(true);
+    expect(collectPluginStatus(project, ".claude").statuses).toEqual([
+      expect.objectContaining({ key: "test-pro", state: "installed-disabled", action: "current" }),
+    ]);
+
+    claudeProjectEnablement(project, "settings.json", { "aidlc-test-pro@fixture-marketplace": true });
+    const on = await syncPlugins(project, [], ".claude");
+    expect(on.activated).toEqual(["test-pro"]);
+    expect(buildAndTest(project)).toBe(composed);
+    expect(stageNode(project, "test-pro-integration")?.enabled).toBeUndefined();
+  }, 90_000);
+
+  test("a running workflow keeps a plugin the host disabled active", async () => {
+    const project = installedProject();
+    withClaudeFixture(TEST_PRO);
+    await syncPlugins(project, [], ".claude");
+    const dirName = "in-use-deadbeef";
+    const intentDir = join(project, "aidlc", "spaces", "default", "intents", dirName);
+    mkdirSync(intentDir, { recursive: true });
+    writeFileSync(
+      join(project, "aidlc", "spaces", "default", "intents", "intents.json"),
+      `${JSON.stringify([{
+        uuid: "deadbeef-0000-4000-8000-000000000000",
+        slug: "in-use",
+        dirName,
+        scope: "test-pro-validation",
+        status: "in-flight",
+      }], null, 2)}\n`,
+    );
+    writeFileSync(
+      join(intentDir, "aidlc-state.md"),
+      [
+        "# AI-DLC State Tracking",
+        "",
+        "## Project Information",
+        "- **Scope**: test-pro-validation",
+        "",
+        "## Current Status",
+        "- **Status**: Running",
+        "",
+      ].join("\n"),
+    );
+
+    claudeProjectEnablement(project, "settings.json", { "aidlc-test-pro@fixture-marketplace": false });
+    const result = await syncPlugins(project, [], ".claude");
+    expect(result.deactivated).toEqual([]);
+    expect(result.kept).toEqual([{
+      key: "test-pro",
+      reasons: [expect.stringContaining('runs under scope "test-pro-validation"')],
+    }]);
+    expect(buildAndTest(project)).toContain("Step 8a (test-pro)");
+  }, 60_000);
+
+  test("select refuses to turn off a plugin the host keeps enabled", async () => {
+    const project = installedProject();
+    withClaudeFixture(TEST_PRO);
+    await syncPlugins(project, [], ".claude");
+    const refused = spawnSync(
+      process.execPath,
+      [join(project, ".claude", "tools", "aidlc-utility.ts"), "select-plugins", "aidlc"],
+      { cwd: project, encoding: "utf-8", env: { ...process.env, AIDLC_PROJECT_DIR: project } },
+    );
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain("installed and enabled for this project");
+    expect(refused.stderr).toContain("/plugin disable aidlc-test-pro");
+    expect(harnessJson(project).plugins).toBeUndefined();
   }, 60_000);
 
   test("a manual sync in a Copilot project composes what Copilot has installed", async () => {

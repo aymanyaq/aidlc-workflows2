@@ -68,7 +68,7 @@ diagnostic and lifecycle routes.
 | `/aidlc config set <key> <value> [--key value ...]` | Change intent settings through the shared setter; typed lowering switches apply at prompt time |
 | `/aidlc config set guard.<fence> <on\|off>` | Turn one fence off for this piece of work, or back on above the policy word (plan-approval, review-freeze, state-transition, reviewer-scope) |
 | `/aidlc config list` | List all eleven active workflow settings (`--json` for structured output) |
-| `/aidlc plugin select [names]` | Show or set the enabled plugin list for this install |
+| `/aidlc plugin select [names]` | Show the active plugins, or choose whether core's own workflow is active beside them |
 | `/aidlc plugin list` | List installed plugins and enabled state |
 | `/aidlc plugin sync` | Compose installed plugin roots into the current install |
 | `/aidlc plugin validate [path]` | Validate an authored plugin (`--json` for structured findings) |
@@ -2178,8 +2178,14 @@ doctor exit code.
 
 ### Plugin state
 
-`/aidlc plugin list` prints installed plugin names and whether each is enabled.
-`/aidlc plugin select [names]` is the public command. `select-plugins` is its
+Plugins follow the host: a plugin installed and enabled through the host is
+active in the project, and one the host disabled or uninstalled leaves at the
+next `/aidlc plugin sync`. There is nothing to enable by hand.
+
+`/aidlc plugin list` compares installed with composed plugins and names what a
+sync would change. `/aidlc plugin select [names]` chooses whether core's own
+workflow is active beside the plugins (it refuses to turn off a plugin the host
+keeps enabled, and names the host command that does). `select-plugins` is its
 direct utility form; it is not an `/aidlc select-plugins` command.
 `bun .claude/tools/aidlc-utility.ts select-plugins` prints the current selection
 (`all enabled (no selection)` when the `plugins` key is absent) and the known

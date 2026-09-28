@@ -300,11 +300,11 @@ describe("t224 plugin selection - install chooses visible plugin surfaces", () =
     expect(readFileSync(sidecar, "utf-8")).toBe(composedSidecar);
   });
 
-  test("compose does not merge contributions for a plugin the selection disables", () => {
-    const proj = join(tmp, "no-merge-disabled");
+  test("composing a plugin into a project with a selection activates it", () => {
+    const proj = join(tmp, "compose-activates");
     copyHarnessInstall("claude", proj);
-    // Pre-select core only, THEN compose: the plugin's stages copy (filtered
-    // at runtime) but its contributions must NOT weld into core stage source.
+    // Installing is what activates a plugin: a project that already names its
+    // plugins gains this one, and its contributions merge into core stages.
     const harness = JSON.parse(readFileSync(harnessPath(proj), "utf-8"));
     harness.plugins = ["aidlc"];
     writeFileSync(harnessPath(proj), `${JSON.stringify(harness, null, 2)}\n`);
@@ -315,9 +315,11 @@ describe("t224 plugin selection - install chooses visible plugin surfaces", () =
       pluginBuilt,
       copyInstall: false,
     });
+    expect(JSON.parse(readFileSync(harnessPath(proj), "utf-8")).plugins).toEqual(["aidlc", "test-pro"]);
     const body = readFileSync(join(proj, ".claude", "aidlc-common", "stages", "construction", "build-and-test.md"), "utf-8");
-    expect(body).not.toContain("test-pro-regression-suite");
-    expect(body).not.toContain("Step 8a (test-pro)");
+    expect(body).toContain("test-pro-regression-suite");
+    expect(body).toContain("Step 8a (test-pro)");
+    expect(graph(proj).find((s) => s.slug === "test-pro-integration")?.enabled).toBeUndefined();
   });
 
   test("unknown plugin names hard-fail and list valid names", () => {
