@@ -159,6 +159,7 @@ describe("t351 remote-action decision", () => {
       "mcp__servicenow__create_change_request",
       "servicenow-create_change_request",
       "servicenow/create_change_request",
+      "@servicenow/create_change_request",
     ]) {
       expect(actionToolMatches("servicenow/create_change_request", name)).toBe(true);
       expect(isMcpToolName(name)).toBe(true);
@@ -167,6 +168,8 @@ describe("t351 remote-action decision", () => {
     expect(actionToolMatches("tickets/*", "tickets-close_ticket")).toBe(true);
     expect(actionToolMatches("tickets/*", "mcp__tickets__open")).toBe(true);
     expect(actionToolMatches("tickets/*", "tickets-")).toBe(false);
+    expect(actionToolMatches("tickets/*", "@tickets/open")).toBe(true);
+    expect(actionToolMatches("tickets/*", "@tickets/")).toBe(false);
     for (const name of ["Bash", "Write", "Task", "report_intent", "web_fetch"]) {
       expect(isMcpToolName(name)).toBe(false);
     }

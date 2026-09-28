@@ -52,7 +52,8 @@ const HOOK_WIRING: Array<{ event: string; matcher?: string; target: string }> = 
   // apply_patch and mutation-capable Bash commands.
   { event: "PreToolUse", target: "review-freeze" },
   // No matcher: the plan-approval-guard target self-filters to spawn_agent
-  // naming the developer agent plus mutation-capable Bash/apply_patch calls.
+  // naming the developer agent, mutation-capable Bash/apply_patch calls, and
+  // mcp__ tools a stage may act through only after its approval.
   { event: "PreToolUse", target: "plan-approval-guard" },
   { event: "PostToolUse", matcher: "request_user_input", target: "record-human-turn" },
   { event: "PostToolUse", matcher: "apply_patch", target: "audit-and-sensors" },

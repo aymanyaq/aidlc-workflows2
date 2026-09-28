@@ -148,6 +148,7 @@ describe("t275 dist/cursor packaging parity + shell shape", () => {
     expect(wiring.version).toBe(1);
     const events = Object.keys(wiring.hooks).sort();
     expect(events).toEqual([
+      "beforeMCPExecution",
       "beforeSubmitPrompt",
       "postToolUse",
       "postToolUseFailure",
@@ -176,6 +177,12 @@ describe("t275 dist/cursor packaging parity + shell shape", () => {
     expect(wiring.hooks.preToolUse).toEqual([
       {
         command: "bun .cursor/hooks/aidlc-cursor-adapter.ts guards",
+        failClosed: true,
+      },
+    ]);
+    expect(wiring.hooks.beforeMCPExecution).toEqual([
+      {
+        command: "bun .cursor/hooks/aidlc-cursor-adapter.ts mcp-guard",
         failClosed: true,
       },
     ]);

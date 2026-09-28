@@ -539,6 +539,261 @@ let activatedBySelection = false;
   }
 }
 
+// --- MCP servers on Kiro and OpenCode ----------------------------------------
+// Claude Code, Copilot, Codex and Cursor load a plugin's MCP servers from the
+// plugin itself. Kiro and OpenCode read servers only from the project's own
+// config, so compose merges them there: .kiro/settings/mcp.json (the workspace
+// servers Kiro's delegated personas include) or opencode.json `mcp`. On Kiro
+// CLI the conductor, which runs inline stages, also gets each server, its
+// tools, and the plan-approval hook for them. What compose wrote is recorded
+// in tools/data/plugin-mcp-<key>.json, so sync takes exactly that out again on
+// upgrade, deactivation or prune. A server another source already configured
+// differently is left alone and reported.
+type McpSidecar = {
+  schemaVersion: 1;
+  config?: { file: string; section: string; servers: Record<string, unknown> };
+  conductor?: {
+    file: string;
+    servers: Record<string, unknown>;
+    tools: string[];
+    hooks: Array<Record<string, unknown>>;
+  };
+};
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isJsonObject(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+// Kiro's agent JSON escapes non-ASCII characters; keep that byte shape.
+function asciiJson(value: unknown): string {
+  return `${JSON.stringify(value, null, 2).replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)}\n`;
+}
+
+// The host would expand the plugin-root variables; a project config has no
+// plugin root, so they become the installed plugin's absolute path.
+function withPluginRoot(value: unknown): unknown {
+  if (typeof value === "string") {
+    return value.replace(/\$\{(?:CLAUDE_PLUGIN_ROOT|PLUGIN_ROOT|CURSOR_PLUGIN_ROOT)\}/g, () => PLUGIN_ROOT);
+  }
+  if (Array.isArray(value)) return value.map(withPluginRoot);
+  if (isJsonObject(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, withPluginRoot(entry)]));
+  }
+  return value;
+}
+
+// OpenCode's shape: a local server is one command array with an environment
+// map, a remote one a url with headers.
+function opencodeMcpServer(server: Record<string, unknown>): Record<string, unknown> {
+  if (typeof server.url === "string") {
+    return {
+      type: "remote",
+      url: server.url,
+      ...(isJsonObject(server.headers) ? { headers: server.headers } : {}),
+      enabled: true,
+    };
+  }
+  const args = Array.isArray(server.args) ? server.args.filter((arg) => typeof arg === "string") : [];
+  return {
+    type: "local",
+    command: [server.command, ...args],
+    ...(isJsonObject(server.env) ? { environment: server.env } : {}),
+    enabled: true,
+  };
+}
+
+function readPriorMcpSidecar(path: string): McpSidecar | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    return isJsonObject(parsed) && parsed.schemaVersion === 1 ? parsed as McpSidecar : null;
+  } catch {
+    return null;
+  }
+}
+
+function mergePluginMcpServers(): void {
+  const kiro = HARNESS_LEAF === ".kiro";
+  if (!kiro && !IS_OPENCODE) return;
+  const source = [".aidlc-mcp.json", ".mcp.json"]
+    .map((name) => join(PLUGIN_ROOT, name))
+    .find((path) => existsSync(path));
+  if (!source) return;
+  const servers: Record<string, Record<string, unknown>> = {};
+  try {
+    const parsed = JSON.parse(readFileSync(source, "utf-8")) as unknown;
+    if (!isJsonObject(parsed) || !isJsonObject(parsed.mcpServers)) {
+      throw new Error("it has no mcpServers object");
+    }
+    for (const [name, server] of Object.entries(parsed.mcpServers)) {
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name) ||
+        !isJsonObject(server) ||
+        (typeof server.command !== "string" && typeof server.url !== "string")
+      ) {
+        recordDrop(`plugin "${PLUGIN_NAME}" MCP server "${name}" needs a safe name and a command or url; not added`);
+        continue;
+      }
+      servers[name] = withPluginRoot(server) as Record<string, unknown>;
+    }
+  } catch (e) {
+    recordDrop(
+      `plugin "${PLUGIN_NAME}" MCP config ${basename(source)} is unreadable (${e instanceof Error ? e.message : String(e)}); its servers were not added`,
+    );
+    return;
+  }
+  const sidecarPath = join(HARNESS_DIR, "tools", "data", `plugin-mcp-${PLUGIN_KEY}.json`);
+  const prior = readPriorMcpSidecar(sidecarPath);
+  const record: McpSidecar = { schemaVersion: 1 };
+
+  // Adds each server to a name→config map; returns what now belongs to this
+  // plugin, leaving a name someone else configured differently untouched.
+  const mergeInto = (
+    entries: Record<string, unknown>,
+    ours: Record<string, unknown>,
+    shape: (server: Record<string, unknown>) => unknown,
+    where: string,
+  ): Record<string, unknown> => {
+    const written: Record<string, unknown> = {};
+    for (const [name, server] of Object.entries(servers)) {
+      const value = shape(server);
+      if (Object.hasOwn(entries, name)) {
+        const mine = Object.hasOwn(ours, name) && sameJson(entries[name], ours[name]);
+        if (!mine && sameJson(entries[name], value)) continue;
+        if (!mine) {
+          recordDrop(
+            `MCP server "${name}" from plugin "${PLUGIN_NAME}" is already configured differently in ${where}; left as is`,
+            "advisory",
+          );
+          continue;
+        }
+      }
+      entries[name] = value;
+      written[name] = value;
+    }
+    return written;
+  };
+
+  const configRel = kiro ? `${HARNESS_LEAF}/settings/mcp.json` : "opencode.json";
+  const section = kiro ? "mcpServers" : "mcp";
+  const configPath = join(PROJECT_DIR, configRel);
+  let config: Record<string, unknown> = {};
+  if (existsSync(configPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(configPath, "utf-8")) as unknown;
+      if (!isJsonObject(parsed)) throw new Error("not a JSON object");
+      config = parsed;
+    } catch (e) {
+      recordDrop(
+        `${configRel} is unreadable (${e instanceof Error ? e.message : String(e)}); plugin "${PLUGIN_NAME}" MCP servers were not added`,
+      );
+      return;
+    }
+  } else if (!kiro) {
+    recordDrop(
+      `opencode.json is missing; plugin "${PLUGIN_NAME}" MCP servers were not added - add them to the project's OpenCode config`,
+      "advisory",
+    );
+    return;
+  }
+  const entries = isJsonObject(config[section]) ? { ...config[section] } : {};
+  const written = mergeInto(entries, prior?.config?.servers ?? {}, (server) => kiro ? server : opencodeMcpServer(server), configRel);
+  if (Object.keys(written).length > 0) {
+    const next = `${JSON.stringify({ ...config, [section]: entries }, null, 2)}\n`;
+    if (!existsSync(configPath) || readFileSync(configPath, "utf-8") !== next) {
+      mkdirSync(dirname(configPath), { recursive: true });
+      writeComposeFile(configPath, next);
+    }
+    record.config = { file: configRel, section, servers: written };
+  }
+
+  if (kiro && !IS_KIRO_IDE && Object.keys(written).length > 0) {
+    const conductorRel = `${HARNESS_LEAF}/agents/aidlc.json`;
+    const conductorPath = join(PROJECT_DIR, conductorRel);
+    try {
+      const agent = JSON.parse(readFileSync(conductorPath, "utf-8")) as Record<string, unknown>;
+      if (!isJsonObject(agent)) throw new Error("not a JSON object");
+      const agentServers = isJsonObject(agent.mcpServers) ? { ...agent.mcpServers } : {};
+      const accepted = Object.fromEntries(Object.entries(servers).filter(([name]) => Object.hasOwn(written, name)));
+      const agentWritten: Record<string, unknown> = {};
+      for (const [name, server] of Object.entries(accepted)) {
+        const ours = prior?.conductor?.servers ?? {};
+        if (Object.hasOwn(agentServers, name) && !(Object.hasOwn(ours, name) && sameJson(agentServers[name], ours[name]))) {
+          if (!sameJson(agentServers[name], server)) {
+            recordDrop(
+              `MCP server "${name}" from plugin "${PLUGIN_NAME}" is already configured differently in ${conductorRel}; left as is`,
+              "advisory",
+            );
+          }
+          continue;
+        }
+        agentServers[name] = server;
+        agentWritten[name] = server;
+      }
+      const tools = Array.isArray(agent.tools) ? [...agent.tools] : [];
+      const addedTools: string[] = [];
+      for (const name of Object.keys(agentWritten)) {
+        const grant = `@${name}`;
+        if (!tools.includes(grant)) {
+          tools.push(grant);
+          addedTools.push(grant);
+        }
+      }
+      const hooks = isJsonObject(agent.hooks) ? { ...agent.hooks } : {};
+      const preToolUse = Array.isArray(hooks.preToolUse) ? [...hooks.preToolUse] : [];
+      const guard = preToolUse.find((hook) =>
+        isJsonObject(hook) && typeof hook.command === "string" && /plan-approval-guard\s*$/.test(hook.command)
+      ) as Record<string, unknown> | undefined;
+      const addedHooks: Array<Record<string, unknown>> = [];
+      if (guard) {
+        for (const name of Object.keys(agentWritten)) {
+          const hook = { matcher: `@${name}`, command: guard.command, timeout_ms: guard.timeout_ms ?? 15000 };
+          if (!preToolUse.some((entry) => sameJson(entry, hook))) {
+            preToolUse.push(hook);
+            addedHooks.push(hook);
+          }
+        }
+      }
+      if (Object.keys(agentWritten).length > 0) {
+        const next = asciiJson({
+          ...agent,
+          tools,
+          mcpServers: agentServers,
+          hooks: { ...hooks, preToolUse },
+        });
+        if (readFileSync(conductorPath, "utf-8") !== next) writeComposeFile(conductorPath, next);
+        record.conductor = { file: conductorRel, servers: agentWritten, tools: addedTools, hooks: addedHooks };
+      }
+    } catch (e) {
+      recordDrop(
+        `${conductorRel} could not take plugin "${PLUGIN_NAME}" MCP servers (${e instanceof Error ? e.message : String(e)}); inline stages cannot call them`,
+        "advisory",
+      );
+    }
+  }
+
+  const sidecarText = `${JSON.stringify(record, null, 2)}\n`;
+  if (!record.config && !record.conductor) {
+    if (prior && existsSync(sidecarPath)) rmSync(sidecarPath, { force: true });
+    return;
+  }
+  if (!existsSync(sidecarPath) || readFileSync(sidecarPath, "utf-8") !== sidecarText) {
+    mkdirSync(dirname(sidecarPath), { recursive: true });
+    writeComposeFile(sidecarPath, sidecarText);
+  }
+}
+
 // --- helpers ---------------------------------------------------------------
 
 function walk(dir: string): string[] {
@@ -903,7 +1158,42 @@ function projectKiroNativeAgent(ctx: CopyContext): string {
   if (!m || /^(tools|permissions):/m.test(m[1])) return stripped;
   const grant = coreKiroIdeDispatchGrant();
   if (!grant) return stripped;
-  return stripped.replace(m[0], () => `---\n${[m[1], ...grant].join("\n")}\n---\n`);
+  return stripped.replace(
+    m[0],
+    () => `---\n${[m[1], ...withKiroMcpGrants(grant, m[1], ctx.rel)].join("\n")}\n---\n`,
+  );
+}
+
+// Kiro names an agent's MCP tools @<server> (all of them) or @<server>/<tool>,
+// so the persona's mcp_tools join the tools list of the grant it receives.
+function withKiroMcpGrants(grant: string[], frontmatterBody: string, rel: string): string[] {
+  const { grants } = takeMcpToolGrants(frontmatterBody.split(/\r?\n/));
+  if (grants.length === 0) return grant;
+  const kiroTools: string[] = [];
+  for (const entry of grants) {
+    const match = entry.match(MCP_TOOL_GRANT);
+    if (!match) {
+      recordDrop(
+        `plugin "${PLUGIN_NAME}" agent file "${rel}" mcp_tools entry "${entry}" is not <server>/<tool> or <server>/*; not granted`,
+        "advisory",
+      );
+      continue;
+    }
+    const [server, tool] = entry.split("/");
+    kiroTools.push(tool === "*" ? `@${server}` : `@${server}/${tool}`);
+  }
+  return grant.map((line) => {
+    const tools = line.match(/^tools:\s*(\[.*\])\s*$/);
+    if (!tools) return line;
+    try {
+      const list = JSON.parse(tools[1]) as unknown;
+      if (!Array.isArray(list)) return line;
+      const merged = [...list, ...kiroTools.filter((tool) => !list.includes(tool))];
+      return `tools: [${merged.map((tool) => JSON.stringify(tool)).join(", ")}]`;
+    } catch {
+      return line;
+    }
+  });
 }
 
 function kiroNativeAgentPrecheck(): CopyPrecheck {
@@ -2545,6 +2835,8 @@ try {
       rollbackComposeWrites();
     }
   }
+
+  mergePluginMcpServers();
 
   // 3. Recompile when something changed OR when a prior compile did not land —
   //    a transient failure (disk full, killed mid-session-start) must self-heal

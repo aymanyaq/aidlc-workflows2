@@ -717,7 +717,16 @@ if (target === "plan-approval-guard") {
   const ti = kiro.tool_input ?? {};
   const canonical = canonicalTool(tool, ti);
   let payload: Record<string, unknown>;
-  if (dispatch?.agents.includes("aidlc-developer-agent")) {
+  if (tool.startsWith("@")) {
+    // An MCP tool (@<server>/<tool>): the core guard decides whether the
+    // current stage may act on that remote system yet.
+    payload = {
+      hook_event_name: "PreToolUse",
+      tool_name: tool,
+      tool_input: ti,
+      cwd: projectDir,
+    };
+  } else if (dispatch?.agents.includes("aidlc-developer-agent")) {
     payload = {
       hook_event_name: "PreToolUse",
       tool_name: "Task",

@@ -1442,6 +1442,20 @@ function buildForward(): Forward {
     case "plan-approval-guard": {
       const toolName = ide.toolName ?? "";
       const toolArgs = ide.toolArgs ?? {};
+      // Kiro names an MCP tool @<server>/<tool>. It acts on another system, not
+      // the workspace, so the write-recovery latches below do not apply; the
+      // core guard decides whether the current stage may call it yet.
+      if (toolName.startsWith("@")) {
+        return {
+          hook: "aidlc-plan-approval-guard.ts",
+          input: {
+            hook_event_name: "PreToolUse",
+            tool_name: toolName,
+            tool_input: toolArgs,
+            cwd: projectDir,
+          },
+        };
+      }
       if (ide.channel === "legacy") {
         try {
           markKiroIdeLegacyPlanApprovalHost(

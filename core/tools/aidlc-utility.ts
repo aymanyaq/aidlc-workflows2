@@ -279,6 +279,7 @@ import {
   copyProjectSurfaces,
   hostEnabledPlugins,
   projectDiffPlan,
+  removePluginMcpServers,
 } from "./aidlc-plugin.ts";
 import { executePlan } from "./aidlc-transaction.ts";
 import {
@@ -1118,10 +1119,15 @@ function removePluginFragments(content: string, plugin: string): string {
 // compose recreates them when the plugin is re-enabled.
 function stripDisabledPluginContributions(
   plugins: readonly string[],
+  stagedProject: string,
 ): string[] {
   const stagesRoot = installedStagesRoot();
   const stripped: string[] = [];
   for (const plugin of plugins) {
+    // MCP servers compose merged into a Kiro or OpenCode project's config.
+    const mcpSidecar = join(stagedProject, harnessDir(), "tools", "data", `plugin-mcp-${plugin}.json`);
+    const hadMcp = existsSync(mcpSidecar);
+    removePluginMcpServers(stagedProject, harnessDir(), plugin);
     const sidecar = pluginContribSidecarPath(plugin);
     let manifest: Record<string, StageContribRecord> = {};
     if (existsSync(sidecar)) {
@@ -1170,7 +1176,7 @@ function stripDisabledPluginContributions(
       rmSync(sidecar, { force: true });
       pluginTouched = true;
     }
-    if (pluginTouched) stripped.push(plugin);
+    if (pluginTouched || hadMcp) stripped.push(plugin);
   }
   return stripped;
 }
@@ -1318,7 +1324,7 @@ function handleSelectPlugins(projectDir: string, positional: string[]): void {
         resetSelectionSensitiveCaches();
         // Strip disabled contributions in staging before recompiling. The live
         // project remains byte-untouched until the shared transaction commits.
-        strippedPlugins = stripDisabledPluginContributions(disabling);
+        strippedPlugins = stripDisabledPluginContributions(disabling, stagedProject);
         writePluginSelection(stagedProject, names);
         regenerateSelectionSurfaces(stagedProject, projectDir);
       } finally {

@@ -481,6 +481,36 @@ Classic enables sensors and learnings and disables summary confirmation;
 stage approvals, Plan Approval, human-turn
 authority, audit, and team write protection remain in force.
 
+### `action_tools` and `action_record`
+
+A stage whose outcome is created on another system (a change request, a
+ticket, a deployment) declares the MCP tools it acts through and the artifact
+that records what it did:
+
+```yaml
+requires_stage:
+  - acme-plan-change        # its approval gate authorizes the action
+produces:
+  - acme-change-record
+action_tools:
+  - servicenow/create_change_request
+  - tickets/*               # every tool the tickets server offers
+action_record: acme-change-record
+```
+
+Entries are `<server>/<tool>` or `<server>/*`. The schema requires both fields
+together, `action_record` among the stage's `produces`, and at least one
+`requires_stage` whose gate approves the action. The plan-approval guard
+refuses a declared tool, under each host's name for it (Claude Code and Codex
+`mcp__<server>__<tool>`, Copilot `<server>-<tool>`, Kiro `@<server>/<tool>`;
+Cursor and OpenCode through their adapters), unless this stage is current and
+every `requires_stage` stage is completed, and records `PLAN_APPROVAL_BLOCKED`.
+Tools no stage declares, and calls outside a workflow, pass. The
+required-sections sensor checks the record for a `## Remote Outcomes` table
+naming System, Operation, Identifier, Link, Performed and Result, with every
+cell filled. A plugin ships the servers themselves in `.mcp.json`
+([Plugin Mechanism §7](18-plugin-mechanism.md#7-methodrules-agents-knowledge-scopes-and-activation)).
+
 ---
 
 ## Relationship to agent frontmatter

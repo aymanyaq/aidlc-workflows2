@@ -710,7 +710,9 @@ switch (target) {
     // exit 2 + stderr, cached like reviewer-scope so duplicate delivery replays
     // the block faithfully.
     const tool = codex.tool_name ?? "";
-    if (tool === "Bash") {
+    // Codex names an MCP tool mcp__<server>__<tool>; the core guard decides
+    // whether the current stage may act on that remote system yet.
+    if (tool === "Bash" || tool.startsWith("mcp__")) {
       const r = runCoreWithStderr("aidlc-plan-approval-guard.ts", rawInput);
       persistResponse(r.stdout, r.code === 2 ? 2 : 0, r.stderr);
       if (r.code === 2) {

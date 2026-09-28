@@ -237,7 +237,9 @@ implicit skill matching so 37 runner descriptions don't pollute the index).
 - **MCP servers**: Codex reads MCP definitions from `[mcp_servers.<name>]`
   tables in `config.toml` (project `.codex/config.toml` or `~/.codex/config.toml`)
   — add the servers you need there. The shipped config declares **none** (the
-  Claude harness ships five via `.mcp.json`; Codex ships zero by default).
+  Claude harness ships five via `.mcp.json`; Codex ships zero by default). An
+  AIDLC plugin brings its own servers in its `.mcp.json`, which its
+  `.codex-plugin/plugin.json` names, so installing the plugin starts them.
 
 ## Regenerating
 

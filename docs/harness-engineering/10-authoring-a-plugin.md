@@ -369,15 +369,20 @@ in `.mcp.json` at the plugin root, in the standard shape:
 }
 ```
 
-The build ships `.mcp.json` in the Claude Code and Copilot plugin projections,
-which both read it from the plugin root, and each host starts the servers when
-the plugin is installed. Other harnesses get no copy; their users configure the
-servers on their host, and VALIDATE says so. Keep credentials out of the file:
-a remote server authenticates with the user's own sign-in or environment, never
+Every plugin projection carries the servers where its host reads them: Claude
+Code and Copilot `.mcp.json` at the plugin root, Codex the `.mcp.json` its
+manifest names, and Cursor `mcp.json` at the root; each host starts them when
+the plugin is installed. Kiro and OpenCode read servers only from the project,
+so compose merges them into `.kiro/settings/mcp.json` (and, on Kiro CLI, the
+conductor agent) or `opencode.json` `mcp`, with `${CLAUDE_PLUGIN_ROOT}` replaced
+by the installed plugin's path. It never overwrites a server someone else
+configured differently, and sync takes out exactly what it merged when the
+plugin is upgraded, deactivated, or pruned. Keep credentials out of the file: a
+remote server authenticates with the user's own sign-in or environment, never
 a committed token. A local server that needs files from the plugin can use the
-`sh -c` form above: Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` before the
-shell runs, and Copilot sets `CLAUDE_PLUGIN_ROOT` (and `PLUGIN_ROOT`) in the
-server's environment for the shell to expand.
+`sh -c` form above: Claude Code and Cursor substitute `${CLAUDE_PLUGIN_ROOT}`
+before the shell runs, and Copilot sets `CLAUDE_PLUGIN_ROOT` (and
+`PLUGIN_ROOT`) in the server's environment for the shell to expand.
 
 Then grant each agent the MCP tools it acts through, in its frontmatter:
 
@@ -391,10 +396,18 @@ mcp_tools:
 Entries are `<server>/<tool>` or `<server>/*`. On Copilot, compose appends them
 to the agent's `tools:` allowlist, which otherwise holds only the built-in
 worker tools, so a delegated agent can call exactly these MCP tools and no
-others. Claude Code subagents already inherit every MCP server in the session,
-so there the field is informational. VALIDATE rejects a malformed entry and
-warns about a server the plugin does not declare, since each user must then
-configure it.
+others. On Kiro IDE it appends them to the persona's `tools:` as `@<server>` or
+`@<server>/<tool>`. Claude Code, Codex, Cursor, and OpenCode agents already see
+every MCP server in the session, so there the field is informational; on Kiro
+CLI, grant `@<server>` in the agent's hand-authored JSON. VALIDATE rejects a
+malformed entry and warns about a server the plugin does not declare, since
+each user must then configure it.
+
+A stage that *acts* through these tools (creates the change request, files
+the ticket) declares them in `action_tools:` with the artifact that records the
+outcome in `action_record:`; the engine then refuses those calls until the
+stage that planned the action is approved. See
+[Stage Definition](../reference/15-stage-definition.md#action_tools-and-action_record).
 
 ## 5. Distribution + install
 
@@ -500,8 +513,9 @@ and enabled for the project is active: its session-start compose (or
 `aidlc engine plugin sync`) adds it to `harness.json` `plugins` when the
 project has that list, and merges its contributions. Disable or uninstall it
 in the host, then run `aidlc engine plugin sync`: sync deselects every plugin
-the host no longer enables, strips what it merged into other stages, and
-keeps its files so a reinstall restores it byte-identical. A plugin a running workflow still uses stays active until the
+the host no longer enables, strips what it merged into other stages and the
+MCP servers it added, and keeps its files so a reinstall restores it
+byte-identical. A plugin a running workflow still uses stays active until the
 workflow finishes. Installing a changed version again, in the same project,
 replaces the previous composition, including anything the new version no
 longer ships.

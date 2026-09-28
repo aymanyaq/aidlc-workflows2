@@ -1082,8 +1082,9 @@ async function mutationIntent(
 // --- Remote actions ----------------------------------------------------------
 // A stage that acts on a remote system declares the MCP tools it acts through
 // (`action_tools`, as <server>/<tool> or <server>/*). Hosts name an MCP tool
-// differently at PreToolUse: Claude Code and Codex mcp__<server>__<tool>,
-// Copilot <server>-<tool>, and an allowlist <server>/<tool>. A declared tool is
+// differently at PreToolUse: Claude Code, Codex, and Cursor and OpenCode
+// through their adapters mcp__<server>__<tool>, Copilot <server>-<tool>, Kiro
+// @<server>/<tool>, and an allowlist <server>/<tool>. A declared tool is
 // allowed only while its stage is current and every requires_stage stage is
 // completed, so the approval gate of the stage that planned the action has
 // passed. Tools no stage declares, and calls outside a workflow, are not this
@@ -1093,7 +1094,7 @@ export function actionToolMatches(grant: string, toolName: string): boolean {
   if (slash <= 0) return false;
   const server = grant.slice(0, slash);
   const tool = grant.slice(slash + 1);
-  const prefixes = [`mcp__${server}__`, `${server}-`, `${server}/`];
+  const prefixes = [`mcp__${server}__`, `${server}-`, `${server}/`, `@${server}/`];
   return tool === "*"
     ? prefixes.some((prefix) => toolName.startsWith(prefix) && toolName.length > prefix.length)
     : prefixes.some((prefix) => toolName === `${prefix}${tool}`);

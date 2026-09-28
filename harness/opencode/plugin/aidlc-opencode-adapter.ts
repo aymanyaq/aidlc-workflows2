@@ -43,6 +43,7 @@
 //     but never scopes the main session.
 
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 const NUDGE_SENTINEL = "[aidlc-forwarding-nudge]";
@@ -225,6 +226,30 @@ function aidlcBashBoundaryViolation(
 }
 
 /** Extract every source and destination path touched by an apply_patch call. */
+// OpenCode names an MCP tool <server>_<tool>, with every character outside
+// [A-Za-z0-9_-] replaced by "_". The servers are the project's opencode.json
+// `mcp` entries (compose adds a plugin's there), so a call to one reaches the
+// core guard as Claude Code's mcp__<server>__<tool>: a stage may act on that
+// remote system only after its approval.
+function mcpToolName(tool: string, directory: string): string | null {
+  let servers: string[];
+  try {
+    const config = JSON.parse(readFileSync(join(directory, "opencode.json"), "utf-8")) as {
+      mcp?: Record<string, unknown>;
+    };
+    servers = Object.keys(config.mcp ?? {});
+  } catch {
+    return null;
+  }
+  for (const server of servers.sort((a, b) => b.length - a.length)) {
+    const prefix = `${server.replace(/[^A-Za-z0-9_-]/g, "_")}_`;
+    if (tool.startsWith(prefix) && tool.length > prefix.length) {
+      return `mcp__${server}__${tool.slice(prefix.length)}`;
+    }
+  }
+  return null;
+}
+
 function applyPatchPaths(args: Record<string, unknown>): string[] {
   const patch =
     (args.patchText as string) ??
@@ -390,6 +415,26 @@ export default async ({
       output: { args: Record<string, unknown> },
     ) => {
       const args = output.args ?? {};
+      const mcpTool = mcpToolName(input.tool, directory);
+      if (mcpTool) {
+        const guard = await runCore(
+          "aidlc-plan-approval-guard.ts",
+          {
+            hook_event_name: "PreToolUse",
+            session_id: input.sessionID,
+            tool_name: mcpTool,
+            tool_input: args,
+            cwd: directory,
+          },
+          directory,
+        );
+        if (guard.code === 2) {
+          throw new Error(
+            guard.stderr.trim() ||
+              "this MCP tool acts on a remote system only after its stage's approval",
+          );
+        }
+      }
       if (input.tool === "task") {
         const dispatch = await runCore(
           "aidlc-deliver-stage-rules.ts",

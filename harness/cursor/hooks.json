@@ -16,6 +16,12 @@
         "failClosed": true
       }
     ],
+    "beforeMCPExecution": [
+      {
+        "command": "bun .cursor/hooks/aidlc-cursor-adapter.ts mcp-guard",
+        "failClosed": true
+      }
+    ],
     "postToolUse": [
       { "command": "bun .cursor/hooks/aidlc-cursor-adapter.ts audit-and-sensors" },
       { "command": "bun .cursor/hooks/aidlc-cursor-adapter.ts runtime-compile" }

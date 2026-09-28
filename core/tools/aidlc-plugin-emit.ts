@@ -430,21 +430,67 @@ function writeHookWiring(
   );
 }
 
-// Claude Code and Copilot read a plugin's MCP servers from .mcp.json at the
-// plugin root; the other hosts configure MCP servers outside the plugin.
-const MCP_CONFIG_HARNESSES = new Set(["claude", "copilot"]);
+// Where each host reads a plugin's MCP servers. Claude Code and Copilot read
+// .mcp.json at the plugin root, Codex the file its manifest names, and Cursor
+// discovers mcp.json at the root. Kiro and OpenCode have no plugin MCP surface:
+// the servers travel as a compose input that compose merges into the project's
+// own MCP config (.kiro/settings/mcp.json, opencode.json).
+const PLUGIN_MCP_FILE: Readonly<Record<string, string>> = {
+  claude: ".mcp.json",
+  copilot: ".mcp.json",
+  codex: ".mcp.json",
+  cursor: "mcp.json",
+  kiro: ".aidlc-mcp.json",
+  "kiro-ide": ".aidlc-mcp.json",
+  opencode: ".aidlc-mcp.json",
+};
+
+// The manifest field that points a host at the plugin's MCP file, where the
+// host needs one.
+const PLUGIN_MCP_MANIFEST_FIELD: Readonly<Record<string, string>> = {
+  codex: "./.mcp.json",
+  cursor: "./mcp.json",
+};
+
+export function pluginMcpFile(harnessName: string): string | null {
+  return PLUGIN_MCP_FILE[harnessName] ?? null;
+}
+
+function pluginHasMcpConfig(pluginRoot: string): boolean {
+  const source = join(pluginRoot, ".mcp.json");
+  if (!existsSync(source)) return false;
+  if (lstatSync(source).isSymbolicLink()) {
+    throw new Error(`${source}: plugin MCP config must be a regular file, not a symlink`);
+  }
+  return true;
+}
+
+// Codex names a remote MCP transport streamable-http where Claude Code and
+// Copilot say http; every other field travels unchanged.
+function hostMcpConfig(source: Buffer, harnessName: string): Buffer {
+  if (harnessName !== "codex") return source;
+  const parsed = JSON.parse(source.toString("utf-8")) as { mcpServers?: Record<string, unknown> };
+  let changed = false;
+  for (const server of Object.values(parsed.mcpServers ?? {})) {
+    if (isPlainRecord(server) && server.type === "http") {
+      server.type = "streamable-http";
+      changed = true;
+    }
+  }
+  return changed ? Buffer.from(`${JSON.stringify(parsed, null, 2)}\n`) : source;
+}
 
 function copyPluginMcpConfig(
   pluginRoot: string,
   outDir: string,
   target: PluginTarget,
 ): void {
-  const source = join(pluginRoot, ".mcp.json");
-  if (!existsSync(source) || !MCP_CONFIG_HARNESSES.has(target.harnessName)) return;
-  if (lstatSync(source).isSymbolicLink()) {
-    throw new Error(`${source}: plugin MCP config must be a regular file, not a symlink`);
-  }
-  writeFileSync(join(outDir, ".mcp.json"), readFileSync(source));
+  const file = pluginMcpFile(target.harnessName);
+  if (!file || !pluginHasMcpConfig(pluginRoot)) return;
+  writeFileSync(
+    join(outDir, file),
+    hostMcpConfig(readFileSync(join(pluginRoot, ".mcp.json")), target.harnessName),
+  );
 }
 
 function copyPluginContent(
@@ -649,6 +695,10 @@ export function buildPluginProjection(
             version,
             description,
             author,
+            ...(PLUGIN_MCP_MANIFEST_FIELD[options.target.harnessName] &&
+                pluginHasMcpConfig(pluginRoot)
+              ? { mcpServers: PLUGIN_MCP_MANIFEST_FIELD[options.target.harnessName] }
+              : {}),
           },
           null,
           2,

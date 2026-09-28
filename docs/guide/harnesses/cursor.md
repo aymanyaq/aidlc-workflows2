@@ -107,10 +107,12 @@ utility shortcuts are `/aidlc-status`, `/aidlc-jump --stage <slug>` (or
 - **Hooks ride `.cursor/hooks.json`** through the AIDLC adapter
   (`.cursor/hooks/aidlc-cursor-adapter.ts`), which maps Cursor's camelCase hook
   events (`sessionStart`, `sessionEnd`, `beforeSubmitPrompt`, `preToolUse`,
-  `postToolUse`, `postToolUseFailure`, `preCompact`, `stop`) onto the byte-shared
+  `beforeMCPExecution`, `postToolUse`, `postToolUseFailure`, `preCompact`,
+  `stop`) onto the byte-shared
   core hook bodies (run as bun subprocesses): human-turn recording on each human turn, the
   state-transition, reviewer read-scope, review-freeze, and plan-approval
-  guards before a tool runs, audit +
+  guards before a tool runs, the remote-action check before an MCP tool runs
+  (`beforeMCPExecution` names the server), audit +
   sensors on write/edit, failed-Task attribution cleanup, stage-graph rebuilds on
   shell, and state validation before compaction. The **PreToolUse guards**
   answer on Cursor's `{"permission":"allow"|"deny"}` stdout channel (`deny`

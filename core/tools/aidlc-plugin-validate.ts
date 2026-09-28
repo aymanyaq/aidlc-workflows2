@@ -54,7 +54,6 @@ export type PluginValidationRule =
   | "agent-owner"
   | "agent-mcp-tools"
   | "mcp-config"
-  | "mcp-harnesses"
   | "duplicate-artifact-producer"
   | "artifact-namespace"
   | "contribution-target"
@@ -958,9 +957,10 @@ function validateAgents(
 const MCP_TOOL_GRANT = /^([A-Za-z0-9][A-Za-z0-9_-]*)\/(\*|[A-Za-z0-9][A-Za-z0-9_.-]*)$/;
 const MCP_SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
-// A plugin's .mcp.json declares the MCP servers its agents act through. The
-// build ships it in Claude Code and Copilot plugin projections, which both read
-// it from the plugin root; returns the declared server names.
+// A plugin's .mcp.json declares the MCP servers its agents act through. Every
+// projection carries it: Claude Code, Copilot, Codex and Cursor load it from
+// the plugin, and compose merges it into a Kiro or OpenCode project's MCP
+// config. Returns the declared server names.
 function validateMcp(root: string, findings: MutableFindings): Set<string> {
   const servers = new Set<string>();
   const path = join(root, ".mcp.json");
@@ -1010,13 +1010,6 @@ function validateMcp(root: string, findings: MutableFindings): Set<string> {
     }
     servers.add(name);
   }
-  addWarning(
-    findings,
-    ".mcp.json",
-    "mcp-harnesses",
-    "MCP servers are shipped in the Claude Code and Copilot plugin projections only",
-    "Users of other harnesses configure these servers on their host.",
-  );
   return servers;
 }
 

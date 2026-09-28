@@ -189,12 +189,15 @@ function normalizedSourceBytes(path: string): Buffer {
 }
 
 export function pluginSourceHash(root: string): string {
-  const files = COMPOSE_DIRS.flatMap((directory) =>
-    regularFiles(join(root, directory)).map((path) => ({
-      path,
-      relative: relative(root, path).split(sep).join("/"),
-    }))
-  ).sort((left, right) => left.relative.localeCompare(right.relative));
+  // Kiro and OpenCode projections carry MCP servers as a compose input.
+  const mcpInput = join(root, ".aidlc-mcp.json");
+  const files = [
+    ...COMPOSE_DIRS.flatMap((directory) => regularFiles(join(root, directory))),
+    ...(existsSync(mcpInput) && lstatSync(mcpInput).isFile() ? [mcpInput] : []),
+  ].map((path) => ({
+    path,
+    relative: relative(root, path).split(sep).join("/"),
+  })).sort((left, right) => left.relative.localeCompare(right.relative));
   const hash = createHash("sha256");
   for (const file of files) {
     hash.update(file.relative);
@@ -1297,6 +1300,10 @@ function writeCompositionRecords(
   );
 }
 
+// OpenCode reads MCP servers from the project-root opencode.json, which compose
+// merges a plugin's servers into, so it is staged beside the directories.
+const ROOT_SURFACE_FILES = ["opencode.json"] as const;
+
 export function copyProjectSurfaces(
   projectDir: string,
   stagedProject: string,
@@ -1306,6 +1313,10 @@ export function copyProjectSurfaces(
   for (const entry of [harnessDir, ".agents", ".github", ".opencode", "aidlc"]) {
     const source = join(projectDir, entry);
     if (existsSync(source)) cpSync(source, join(stagedProject, entry), { recursive: true });
+  }
+  for (const entry of ROOT_SURFACE_FILES) {
+    const source = join(projectDir, entry);
+    if (existsSync(source) && lstatSync(source).isFile()) cpSync(source, join(stagedProject, entry));
   }
 }
 
@@ -1459,7 +1470,84 @@ function removeFragments(content: string, key: string, path: string): string {
   return output;
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Takes out the MCP servers compose merged into a Kiro or OpenCode project for
+// this plugin (tools/data/plugin-mcp-<key>.json names each one), and on Kiro
+// CLI the conductor's grants and hooks for them. An entry someone has since
+// changed stays; only what compose wrote goes.
+export function removePluginMcpServers(projectDir: string, harnessDir: string, key: string): void {
+  const sidecar = join(harnessDataDir(projectDir, harnessDir), `plugin-mcp-${key}.json`);
+  if (!existsSync(sidecar)) return;
+  let record: Record<string, unknown>;
+  try {
+    const parsed = readJson(sidecar);
+    if (!isJsonRecord(parsed)) throw new Error("sidecar is not an object");
+    record = parsed;
+  } catch (error) {
+    throw new Error(`${sidecar}: MCP sidecar is invalid: ${errorMessage(error)}`);
+  }
+  const edit = (
+    file: unknown,
+    change: (data: Record<string, unknown>) => void,
+    ascii: boolean,
+  ): void => {
+    if (typeof file !== "string" || isAbsolute(file) || file.split(/[\\/]/).includes("..")) return;
+    const path = join(projectDir, file);
+    if (!existsSync(path)) return;
+    const data = readJson(path);
+    if (!isJsonRecord(data)) return;
+    change(data);
+    const text = JSON.stringify(data, null, 2);
+    writeFileSync(
+      path,
+      `${ascii
+        ? text.replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)
+        : text}\n`,
+    );
+  };
+  const dropServers = (entries: unknown, recorded: unknown): void => {
+    if (!isJsonRecord(entries) || !isJsonRecord(recorded)) return;
+    for (const [name, value] of Object.entries(recorded)) {
+      if (Object.hasOwn(entries, name) && canonicalJson(entries[name]) === canonicalJson(value)) {
+        delete entries[name];
+      }
+    }
+  };
+  const config = record.config;
+  if (isJsonRecord(config) && typeof config.section === "string") {
+    const section = config.section;
+    edit(config.file, (data) => dropServers(data[section], config.servers), false);
+  }
+  const conductor = record.conductor;
+  if (isJsonRecord(conductor)) {
+    edit(conductor.file, (data) => {
+      dropServers(data.mcpServers, conductor.servers);
+      if (isJsonRecord(data.mcpServers) && Object.keys(data.mcpServers).length === 0) delete data.mcpServers;
+      const tools = new Set(Array.isArray(conductor.tools) ? conductor.tools : []);
+      if (Array.isArray(data.tools)) data.tools = data.tools.filter((tool) => !tools.has(tool));
+      const hooks = new Set((Array.isArray(conductor.hooks) ? conductor.hooks : []).map(canonicalJson));
+      if (isJsonRecord(data.hooks) && Array.isArray(data.hooks.preToolUse)) {
+        data.hooks.preToolUse = data.hooks.preToolUse.filter((hook) => !hooks.has(canonicalJson(hook)));
+      }
+    }, true);
+  }
+  rmSync(sidecar, { force: true });
+}
+
 function pruneContributions(stagedProject: string, harnessDir: string, key: string): void {
+  removePluginMcpServers(stagedProject, harnessDir, key);
   const sidecar = join(harnessDataDir(stagedProject, harnessDir), `plugin-contrib-${key}.json`);
   let records: Record<string, {
     produces?: string[];
@@ -1657,6 +1745,10 @@ function allSurfaceFiles(projectDir: string, harnessDir: string): Map<string, st
     for (const path of surfaceFiles(root)) {
       files.set(relative(projectDir, path).split(sep).join("/"), path);
     }
+  }
+  for (const entry of ROOT_SURFACE_FILES) {
+    const path = join(projectDir, entry);
+    if (existsSync(path) && lstatSync(path).isFile()) files.set(entry, path);
   }
   return files;
 }

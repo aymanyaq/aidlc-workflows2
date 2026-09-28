@@ -69,6 +69,8 @@ interface CursorHookInput {
   transcript_path?: string | null;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  // beforeMCPExecution: the server from mcp.json beside the bare tool name.
+  mcp_server_name?: string;
   tool_output?: unknown;
   tool_use_id?: string;
   reason?: string;
@@ -90,7 +92,7 @@ export async function run(
       rawInput = input;
       if (rawInput.length > 0) cursor = JSON.parse(rawInput) as CursorHookInput;
     } catch {
-      if (target === "guards") {
+      if (target === "guards" || target === "mcp-guard") {
         process.stdout.write(`${JSON.stringify({
           permission: "deny",
           agent_message:
@@ -3035,6 +3037,34 @@ export async function run(
       }
       for (const guard of guards) {
         if (blockedByGuard(guard.file, guard.input)) return 0;
+      }
+      writeAllow();
+      return 0;
+    }
+
+    case "mcp-guard": {
+      // beforeMCPExecution names the server beside the tool (preToolUse sees
+      // only MCP:<tool>), so the core guard gets Claude Code's
+      // mcp__<server>__<tool> and decides whether the current stage may act on
+      // that remote system yet. Allow is explicit, as under preToolUse.
+      const server = typeof cursor.mcp_server_name === "string" ? cursor.mcp_server_name.trim() : "";
+      const tool = typeof cursor.tool_name === "string" ? cursor.tool_name.trim() : "";
+      if (server && tool) {
+        let toolInput: unknown = cursor.tool_input ?? {};
+        if (typeof toolInput === "string") {
+          try {
+            toolInput = JSON.parse(toolInput);
+          } catch {
+            toolInput = { raw: toolInput };
+          }
+        }
+        const input = JSON.stringify({
+          hook_event_name: "PreToolUse",
+          tool_name: `mcp__${server}__${tool}`,
+          tool_input: toolInput,
+          cwd: effectiveCwd(),
+        });
+        if (blockedByGuard("aidlc-plan-approval-guard.ts", input)) return 0;
       }
       writeAllow();
       return 0;
