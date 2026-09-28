@@ -368,14 +368,10 @@ function pluginEnabledBySelection(): boolean {
   return selected === null || selected.has(PLUGIN_NAME);
 }
 
-function selectCommandForPlugin(): string {
-  const selected = selectedPlugins();
-  const names = new Set<string>(selected ?? ["aidlc"]);
-  names.add(PLUGIN_NAME);
-  const selection = [...names].sort().join(",");
+function syncCommandForPlugin(): string {
   return NATIVE_RUNTIME
-    ? `aidlc engine plugin select ${selection}`
-    : `bun ${HARNESS_LEAF}/tools/aidlc-utility.ts select-plugins ${selection}`;
+    ? "aidlc engine plugin sync"
+    : `bun ${HARNESS_LEAF}/tools/aidlc-plugin.ts sync`;
 }
 
 function installedToolCommand(tool: "utility" | "graph" | "runner", args: string[]): string[] {
@@ -569,11 +565,27 @@ function rollbackComposeWrites(): void {
   }
 }
 
-if (!pluginEnabledBySelection()) {
-  recordDrop(
-    `plugin "${PLUGIN_NAME}" composed but is not enabled by tools/data/harness.json; run \`${selectCommandForPlugin()}\` to expose its stages, scopes, and runners`,
-    "advisory",
-  );
+// Installing a plugin is what activates it: a project whose harness.json
+// names its plugins gains this one. Sync selects before it composes; this
+// covers a direct compose run. Written through the compose transaction, so a
+// failed compile restores the previous selection.
+let activatedBySelection = false;
+{
+  const selected = selectedPlugins();
+  if (selected !== null && !selected.has(PLUGIN_NAME) && /^[a-z][a-z0-9-]*$/.test(PLUGIN_NAME)) {
+    const harnessJson = join(HARNESS_DIR, "tools", "data", "harness.json");
+    try {
+      const data = JSON.parse(readFileSync(harnessJson, "utf-8")) as Record<string, unknown>;
+      data.plugins = [...new Set([...selected, PLUGIN_NAME])].sort();
+      writeComposeFile(harnessJson, `${JSON.stringify(data, null, 2)}\n`);
+      activatedBySelection = true;
+    } catch (e) {
+      recordDrop(
+        `plugin "${PLUGIN_NAME}" could not be added to tools/data/harness.json plugins (${e instanceof Error ? e.message : String(e)}); run \`${syncCommandForPlugin()}\` to activate it`,
+        "advisory",
+      );
+    }
+  }
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -2264,8 +2276,8 @@ try {
   // merged contributions land in CORE stage source where no selection filter
   // reaches - so composing them while disabled would weld a disabled plugin's
   // produces/sensors/prose into enabled stages (and undo select-plugins'
-  // disable-time strip on the very next session start). The advisory drop at
-  // the top of this run already names the select-plugins command to enable.
+  // disable-time strip on the very next session start). This run activated the
+  // plugin above unless it could not write the selection, which it reported.
   if (contribManifestLoadError) {
     recordDrop(
       `contribution sidecar ${relative(PROJECT_DIR, contribManifestPath)} is unreadable or invalid (${contribManifestLoadError}); refusing to replace provenance from an already-composed stage - refresh the stock dist/<harness>/ engine, remove the invalid sidecar, then run plugin sync`,
@@ -2607,7 +2619,7 @@ try {
   const retryMarker = join(PROJECT_DIR, "aidlc", `.plugin-compose-retry-${PLUGIN_KEY}`);
   const retryPending = existsSync(retryMarker);
   let recompiled = false;
-  if (changed || graphMissingPluginStage || retryPending) {
+  if (changed || graphMissingPluginStage || retryPending || activatedBySelection) {
     const [command, ...args] = installedToolCommand("graph", ["compile"]);
     const r = spawnSync(command, args, {
       cwd: PROJECT_DIR,

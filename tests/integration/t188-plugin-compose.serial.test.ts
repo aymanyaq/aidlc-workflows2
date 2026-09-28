@@ -982,8 +982,8 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
       .toBe(coreRunnerBefore);
   });
 
-  test("compose does not auto-enable a plugin excluded by an existing selection", () => {
-    const selectedProj = mkdtempSync(join(tmp, "selection-advisory-"));
+  test("compose activates the plugin in an existing selection", () => {
+    const selectedProj = mkdtempSync(join(tmp, "selection-activates-"));
     cpSync(CLAUDE_DIST, join(selectedProj, ".claude"), { recursive: true });
     const harnessJson = join(selectedProj, ".claude", "tools", "data", "harness.json");
     const harness = JSON.parse(readFileSync(harnessJson, "utf-8"));
@@ -1003,9 +1003,10 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
     });
     expect(compose.status).toBe(0);
     expect(existsSync(join(selectedProj, ".claude", "aidlc-common", "stages", "construction", "test-pro-integration.md"))).toBe(true);
-    expect(stage(selectedProj, "test-pro-integration")?.enabled).toBe(false);
-    expect(existsSync(join(selectedProj, ".claude", "skills", "test-pro-integration", "SKILL.md"))).toBe(false);
-    expect(hookDrops(selectedProj)).toContain("select-plugins aidlc,test-pro");
+    expect(JSON.parse(readFileSync(harnessJson, "utf-8")).plugins).toEqual(["aidlc", "test-pro"]);
+    expect(stage(selectedProj, "test-pro-integration")?.enabled).toBeUndefined();
+    expect(existsSync(join(selectedProj, ".claude", "skills", "test-pro-integration", "SKILL.md"))).toBe(true);
+    expect(hookDrops(selectedProj)).not.toContain("select-plugins");
   });
 
   test("composed plugin stage bodies are not empty", () => {

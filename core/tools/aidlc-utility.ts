@@ -403,6 +403,7 @@ import {
 import { AIDLC_VERSION } from "./aidlc-version.ts";
 import {
   copyProjectSurfaces,
+  hostEnabledPlugins,
   projectDiffPlan,
 } from "./aidlc-plugin.ts";
 import { executePlan } from "./aidlc-transaction.ts";
@@ -1421,6 +1422,24 @@ function handleSelectPlugins(projectDir: string, positional: string[]): void {
     const unknown = names.filter((name) => !knownSet.has(name));
     if (unknown.length > 0) {
       die(`Unknown plugin name(s): ${unknown.join(", ")}. Valid plugins: ${known.join(", ")}.`);
+    }
+    // Plugins follow the host: one it has installed and enabled here is
+    // activated again at every session start, so it is turned off there.
+    const hostEnabled = hostEnabledPlugins(projectDir, harnessDir());
+    const hostKept = [...hostEnabled.keys()].filter((name) => knownSet.has(name) && !names.includes(name)).sort();
+    if (hostKept.length > 0) {
+      const how = hostKept.map((name) => {
+        const { hostName, harness } = hostEnabled.get(name)!;
+        return harness === "claude"
+          ? `/plugin disable ${hostName} (Claude Code)`
+          : harness === "copilot"
+          ? `copilot plugin disable ${hostName}`
+          : `disable ${hostName} in ${harness}`;
+      });
+      die(
+        `select-plugins refused: ${hostKept.join(", ")} ${hostKept.length === 1 ? "is" : "are"} installed and enabled for this project, and each session start activates ${hostKept.length === 1 ? "it" : "them"} again. ` +
+          `Turn ${hostKept.length === 1 ? "it" : "them"} off in the host instead (${how.join("; ")}), then run \`${aidlcDispatcherInvocation("plugin sync")}\`, which deactivates what the host no longer enables.`,
+      );
     }
     const violations = activeWorkflowDependencyViolations(projectDir, new Set(names));
     if (violations.length > 0) {

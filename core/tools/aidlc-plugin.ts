@@ -18,9 +18,16 @@ import { spawnSync } from "node:child_process";
 import { DEFAULT_SUBPROCESS_TIMEOUT_MS } from "./aidlc-runtime-budget.ts";
 import {
   errorMessage,
+  getField,
+  isArchivedIntent,
+  listIntents,
+  listSpaces,
   parseArgs,
+  parseCheckboxes,
   resolveProjectDir,
+  stateFilePath,
 } from "./aidlc-lib.ts";
+import { appendAuditEntry } from "./aidlc-audit.ts";
 import { policyPathWithin } from "./aidlc-install-paths.ts";
 import {
   aidlcInvocation,
@@ -90,6 +97,7 @@ export type PluginStatusName =
   | "source-changed"
   | "not-composed"
   | "legacy-unstamped"
+  | "not-active"
   | "installed-disabled"
   | "installed-missing"
   | "invalid-installed"
@@ -596,6 +604,27 @@ export function discoverPluginInventory(
   return currentRootInventory(harness);
 }
 
+// The plugins the host has installed and enabled for this project, when its
+// inventory is provable. Each session start activates these again, so turning
+// one off belongs to the host (disable or uninstall), not to a selection.
+export function hostEnabledPlugins(
+  projectDir: string,
+  harnessDir: string,
+): Map<string, { hostName: string; harness: PluginInventory["harness"] }> {
+  const enabled = new Map<string, { hostName: string; harness: PluginInventory["harness"] }>();
+  let inventory: PluginInventory;
+  try {
+    inventory = discoverPluginInventory(harnessDir, projectDir);
+  } catch {
+    return enabled;
+  }
+  if (inventory.capability !== "full-inventory") return enabled;
+  for (const plugin of inventory.installed) {
+    if (plugin.enabled) enabled.set(plugin.key, { hostName: plugin.hostName, harness: inventory.harness });
+  }
+  return enabled;
+}
+
 function harnessDataDir(projectDir: string, harnessDir: string): string {
   return join(projectDir, harnessDir, "tools", "data");
 }
@@ -700,6 +729,137 @@ function selectedPlugins(projectDir: string, harnessDir: string): Set<string> | 
   }
 }
 
+function composedPluginKeys(evidence: ProjectEvidence): Set<string> {
+  return new Set([
+    ...evidence.stamps.keys(),
+    ...evidence.ownership.keys(),
+    ...evidence.legacy,
+  ]);
+}
+
+function frontmatterScalar(content: string, field: string): string | null {
+  const frontmatter = content.replace(/\r\n/g, "\n").match(/^---\n([\s\S]*?)\n---/);
+  const value = frontmatter?.[1].match(new RegExp(`^${field}:\\s*(.+)$`, "m"))?.[1].trim();
+  return value ? value.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1") : null;
+}
+
+// The owner of every compiled stage (enabled or not) and every installed scope:
+// the identities a selection can name, core as "aidlc".
+function pluginOwners(projectDir: string, harnessDir: string): {
+  stages: Map<string, string>;
+  scopes: Map<string, string>;
+} {
+  const stages = new Map<string, string>();
+  const scopes = new Map<string, string>();
+  try {
+    const graph = readJson(join(harnessDataDir(projectDir, harnessDir), "stage-graph.json"));
+    if (Array.isArray(graph)) {
+      for (const node of graph) {
+        if (!node || typeof node !== "object" || Array.isArray(node)) continue;
+        const { slug, plugin, phase } = node as Record<string, unknown>;
+        if (typeof slug !== "string" || phase === "initialization") continue;
+        stages.set(slug, typeof plugin === "string" ? plugin : "aidlc");
+      }
+    }
+  } catch {
+    // An unreadable graph names no stage owner.
+  }
+  const scopeDir = join(projectDir, harnessDir, "scopes");
+  if (existsSync(scopeDir)) {
+    for (const entry of readdirSync(scopeDir).filter((name) => name.endsWith(".md")).sort()) {
+      try {
+        const content = readFileSync(join(scopeDir, entry), "utf-8");
+        const name = frontmatterScalar(content, "name") ?? basename(entry, ".md");
+        scopes.set(name, frontmatterScalar(content, "plugin") ?? "aidlc");
+      } catch {
+        // An unreadable scope file names no owner.
+      }
+    }
+  }
+  return { stages, scopes };
+}
+
+function knownPluginIdentities(projectDir: string, harnessDir: string): string[] {
+  const owners = pluginOwners(projectDir, harnessDir);
+  return [...new Set(["aidlc", ...owners.stages.values(), ...owners.scopes.values()])].sort();
+}
+
+// Plugins follow the host. A plugin the host has installed and enabled for this
+// project is active; one it disabled or no longer lists is not. harness.json
+// `plugins` records that (and whether core's own stages are active), and sync
+// keeps it in step, so nobody selects a plugin by hand. No selection means
+// every known identity is active, so one is written only to leave a plugin out.
+export function hostSelection(
+  selection: ReadonlySet<string> | null,
+  known: readonly string[],
+  enabled: readonly string[],
+  inactive: readonly string[],
+): string[] | null {
+  const drop = new Set(inactive);
+  const current = selection === null ? [...known] : [...selection];
+  const next = new Set(current.filter((name) => !drop.has(name)));
+  for (const key of enabled) next.add(key);
+  const sorted = [...next].sort();
+  if (selection === null) return current.some((name) => drop.has(name)) ? sorted : null;
+  const before = [...selection].sort();
+  return sorted.length === before.length && sorted.every((name, index) => name === before[index])
+    ? null
+    : sorted;
+}
+
+// A running workflow keeps the plugins it depends on: the owner of its scope,
+// and of every EXECUTE stage still ahead in its plan. Deselecting one would
+// leave the workflow naming a scope or stage that no longer exists.
+export function pluginsInUse(
+  projectDir: string,
+  harnessDir: string,
+  keys: readonly string[],
+): Map<string, string[]> {
+  const inUse = new Map<string, string[]>();
+  if (keys.length === 0) return inUse;
+  const wanted = new Set(keys);
+  const owners = pluginOwners(projectDir, harnessDir);
+  const note = (key: string | undefined, why: string): void => {
+    if (!key || !wanted.has(key)) return;
+    inUse.set(key, [...(inUse.get(key) ?? []), why]);
+  };
+  for (const space of listSpaces(projectDir)) {
+    for (const intent of listIntents(projectDir, space.name)) {
+      if (intent.status === "complete" || isArchivedIntent(intent) || !intent.dirName) continue;
+      const path = stateFilePath(projectDir, intent.dirName, space.name);
+      if (!existsSync(path)) continue;
+      const content = readFileSync(path, "utf-8");
+      const status = getField(content, "Status") ?? "";
+      if (status === "Completed" || status === "Archived") continue;
+      const where = `workflow "${intent.dirName}" (space ${space.name})`;
+      const scope = getField(content, "Scope");
+      if (scope) note(owners.scopes.get(scope), `${where} runs under scope "${scope}"`);
+      for (const line of parseCheckboxes(content)) {
+        if (line.state === "completed" || line.state === "skipped") continue;
+        if (!line.suffix.startsWith("EXECUTE")) continue;
+        note(owners.stages.get(line.slug), `${where} has pending stage "${line.slug}"`);
+      }
+    }
+  }
+  return inUse;
+}
+
+function writeSelection(projectDir: string, harnessDir: string, names: readonly string[]): void {
+  const path = join(harnessDataDir(projectDir, harnessDir), "harness.json");
+  let data: Record<string, unknown> = {};
+  try {
+    const parsed = readJson(path);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      data = parsed as Record<string, unknown>;
+    }
+  } catch {
+    data = { harnessDir };
+  }
+  data.plugins = [...names];
+  mkdirSync(harnessDataDir(projectDir, harnessDir), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
+}
+
 function semverDirection(installed: string, composed: string): "upgrade" | "downgrade" | null {
   const left = installed.match(STRICT_SEMVER);
   const right = composed.match(STRICT_SEMVER);
@@ -730,18 +890,31 @@ export function comparePluginState(
     });
   }
   const installedKeys = new Set<string>();
+  const composed = composedPluginKeys(evidence);
+  const active = (key: string): boolean => selection === null || selection.has(key);
   for (const plugin of inventory.installed) {
     installedKeys.add(plugin.key);
     const stamp = evidence.stamps.get(plugin.key);
-    const enabled = plugin.enabled && (selection === null || selection.has(plugin.key));
-    if (!enabled) {
+    if (!plugin.enabled) {
+      // The host decides: a plugin it disabled leaves the project at the next
+      // sync, which strips what it merged and deselects it.
+      const lingering = composed.has(plugin.key) && active(plugin.key);
       rows.push({
         key: plugin.key,
         installedVersion: plugin.version,
         composedVersion: stamp?.version ?? null,
         state: "installed-disabled",
-        action: "current",
-        message: "installed, disabled",
+        action: lingering ? "sync" : "current",
+        message: lingering ? "disabled in the host, still active" : "installed, disabled",
+      });
+    } else if (stamp && !active(plugin.key)) {
+      rows.push({
+        key: plugin.key,
+        installedVersion: plugin.version,
+        composedVersion: stamp.version,
+        state: "not-active",
+        action: "sync",
+        message: "installed, not active",
       });
     } else if (!stamp) {
       const legacy = evidence.legacy.has(plugin.key);
@@ -783,27 +956,24 @@ export function comparePluginState(
       });
     }
   }
-  const composedKeys = new Set([
-    ...evidence.stamps.keys(),
-    ...evidence.ownership.keys(),
-    ...evidence.legacy,
-  ]);
   const invalidKeys = new Set(inventory.invalid.flatMap((item) => item.key ? [item.key] : []));
   // Only a full host list proves a composed plugin is gone. Without one, a
   // composed plugin the host does not show is reported as not compared:
   // nothing for the person to do, so doctor does not warn about it.
   const provedMissing = inventory.capability === "full-inventory";
-  for (const key of [...composedKeys].sort()) {
+  for (const key of [...composed].sort()) {
     if (installedKeys.has(key) || invalidKeys.has(key)) continue;
     rows.push({
       key,
       installedVersion: null,
       composedVersion: evidence.stamps.get(key)?.version ?? null,
       state: provedMissing ? "installed-missing" : "inventory-unavailable",
-      action: provedMissing ? "attention" : "current",
-      message: provedMissing
-        ? `installed plugin missing; reinstall it in your host, or run \`${aidlcInvocation()} engine plugin sync --prune-missing\` to remove what it added`
-        : "not compared: no host plugin list",
+      action: provedMissing && active(key) ? "sync" : "current",
+      message: !provedMissing
+        ? "not compared: no host plugin list"
+        : active(key)
+        ? "uninstalled from the host, still active"
+        : `uninstalled, inactive; \`${aidlcInvocation()} engine plugin sync --prune-missing\` removes its files`,
     });
   }
   return rows.sort((left, right) =>
@@ -1151,9 +1321,10 @@ function pruneContributions(stagedProject: string, harnessDir: string, key: stri
   let records: Record<string, {
     produces?: string[];
     sensors?: string[];
+    scopes?: string[];
     // Compose records consumed artifacts as objects; the shape must match the
     // compose hook's output or the strip matches nothing. See issue #1247.
-    consumes?: Array<string | { artifact: string; required: boolean; conditional_on?: string }>;
+    consumes?: Array<string | { artifact?: unknown }>;
     required_sections?: string[];
     required_sections_created?: boolean;
   }> = {};
@@ -1177,11 +1348,15 @@ function pruneContributions(stagedProject: string, harnessDir: string, key: stri
       if (record) {
         if (record.produces?.length) after = removeListValues(after, "produces", new Set(record.produces), false);
         if (record.sensors?.length) after = removeListValues(after, "sensors", new Set(record.sensors), false);
+        if (record.scopes?.length) after = removeListValues(after, "scopes", new Set(record.scopes), false);
         if (record.consumes?.length) {
-          after = removeConsumes(
-            after,
-            new Set(record.consumes.map((entry) => typeof entry === "string" ? entry : entry.artifact)),
-          );
+          after = removeConsumes(after, new Set(record.consumes.flatMap((entry) =>
+            typeof entry === "string"
+              ? [entry]
+              : entry && typeof entry.artifact === "string"
+              ? [entry.artifact]
+              : []
+          )));
         }
         if (record.required_sections?.length) {
           after = removeListValues(
@@ -1427,12 +1602,21 @@ export function announcePrune(
   );
 }
 
+export type SyncResult = {
+  synced: string[];
+  pruned: string[];
+  operations: number;
+  activated: string[];
+  deactivated: string[];
+  kept: Array<{ key: string; reasons: string[] }>;
+};
+
 export async function syncPlugins(
   projectDir: string,
   argv: string[],
   harnessDir = runtimeHarnessDir(projectDir),
   lockRetry = 0,
-): Promise<{ synced: string[]; pruned: string[]; operations: number }> {
+): Promise<SyncResult> {
   const harness = harnessKind(harnessDir);
   const inventory = currentRoots().length > 0
     ? currentRootInventory(harness)
@@ -1442,21 +1626,21 @@ export async function syncPlugins(
   const prune = argv.includes("--prune-missing");
   let plugins: InstalledPlugin[];
   let missing: string[] = [];
+  // Composed plugins the host disabled or no longer lists. Only a proved full
+  // inventory can say so; a hook's current root speaks for itself alone.
+  let inactive: string[] = [];
   if (inventory.capability === "full-inventory") {
     if (inventory.invalid.length > 0) {
       throw new Error(
         `plugin sync refused: ${inventory.invalid.map((item) => `${item.message}: ${item.paths.join(", ")}`).join("; ")}`,
       );
     }
-    plugins = inventory.installed.filter((plugin) =>
-      plugin.enabled && (selection === null || selection.has(plugin.key))
-    );
+    plugins = inventory.installed.filter((plugin) => plugin.enabled);
     const installed = new Set(inventory.installed.map((plugin) => plugin.key));
-    missing = [...new Set([
-      ...evidence.stamps.keys(),
-      ...evidence.ownership.keys(),
-      ...evidence.legacy,
-    ])].filter((key) => !installed.has(key)).sort();
+    const enabled = new Set(plugins.map((plugin) => plugin.key));
+    const composed = composedPluginKeys(evidence);
+    missing = [...composed].filter((key) => !installed.has(key)).sort();
+    inactive = [...composed].filter((key) => !enabled.has(key)).sort();
   } else {
     if (prune) {
       throw new Error("plugin sync --prune-missing requires a proved full host inventory");
@@ -1473,20 +1657,40 @@ export async function syncPlugins(
   }
   const pruned = prune ? missing : [];
   announcePrune(argv, pruned);
-  if (
+  // A running workflow keeps the plugins it depends on until it finishes.
+  const inUse = pluginsInUse(
+    projectDir,
+    harnessDir,
+    inactive.filter((key) => !pruned.includes(key)),
+  );
+  const kept = [...inUse.entries()].map(([key, reasons]) => ({ key, reasons }));
+  const deactivating = inactive.filter((key) => !inUse.has(key));
+  const desired = hostSelection(
+    selection,
+    knownPluginIdentities(projectDir, harnessDir),
+    plugins.map((plugin) => plugin.key),
+    deactivating,
+  );
+  const activated = desired === null
+    ? []
+    : desired.filter((key) => selection !== null && !selection.has(key));
+  const deactivated = desired === null
+    ? []
+    : deactivating.filter((key) => (selection === null || selection.has(key)) && !desired.includes(key));
+  const synced = plugins.map((plugin) => plugin.key).sort();
+  const settled = (state: ProjectEvidence): boolean =>
     pruned.length === 0 &&
-    plugins.every((plugin) => compositionIsCurrent(plugin, evidence, projectDir))
-  ) {
-    return {
-      synced: plugins.map((plugin) => plugin.key).sort(),
-      pruned: [],
-      operations: 0,
-    };
+    plugins.every((plugin) => compositionIsCurrent(plugin, state, projectDir));
+  if (desired === null && settled(evidence)) {
+    return { synced, pruned: [], operations: 0, activated: [], deactivated: [], kept };
   }
   const stagingRoot = mkdtempSync(join(tmpdir(), "aidlc-plugin-sync-"));
   const stagedProject = join(stagingRoot, "project");
   try {
     copyProjectSurfaces(projectDir, stagedProject, harnessDir);
+    // Select first, so each composer merges an activated plugin's
+    // contributions into the stages it enriches.
+    if (desired !== null) writeSelection(stagedProject, harnessDir, desired);
     const priorOwnedPaths = new Map<string, Set<string>>();
     for (const plugin of plugins) {
       priorOwnedPaths.set(
@@ -1508,6 +1712,11 @@ export async function syncPlugins(
       }
       pruneOwnedPlugin(stagedProject, harnessDir, key, evidence.ownership.get(key));
     }
+    // A deactivated plugin's own files stay (the runtime filters them), but
+    // what it merged into other stages goes; re-enabling composes it back.
+    for (const key of deactivated) {
+      if (!pruned.includes(key)) pruneContributions(stagedProject, harnessDir, key);
+    }
     const claimedPaths = new Set<string>();
     for (const plugin of plugins) {
       writeCompositionRecords(
@@ -1519,12 +1728,20 @@ export async function syncPlugins(
         claimedPaths,
       );
     }
-    if (pruned.length > 0) regenerateAfterPrune(stagedProject, harnessDir);
+    if (pruned.length > 0 || desired !== null) regenerateAfterPrune(stagedProject, harnessDir);
     const plan = projectDiffPlan(projectDir, stagedProject, harnessDir);
     const failAfter = Number(process.env.AIDLC_PLUGIN_SYNC_FAIL_AFTER ?? "0");
     try {
       executePlan(plan, {
         failAfter: Number.isInteger(failAfter) && failAfter > 0 ? failAfter : undefined,
+        validateCommitted: desired === null ? undefined : () => {
+          appendAuditEntry("PLUGIN_SELECTION_CHANGED", {
+            "Previous Selection": selection === null
+              ? "all enabled (no selection)"
+              : [...selection].sort().join(", "),
+            "New Selection": desired.join(", "),
+          }, projectDir);
+        },
       });
     } catch (error) {
       if (
@@ -1542,25 +1759,27 @@ export async function syncPlugins(
         }
         return syncPlugins(projectDir, argv, harnessDir, lockRetry + 1);
       }
-      const refreshedEvidence = projectEvidence(projectDir, harnessDir);
+      const refreshedSelection = selectedPlugins(projectDir, harnessDir);
       if (
-        pruned.length === 0 &&
-        plugins.every((plugin) =>
-          compositionIsCurrent(plugin, refreshedEvidence, projectDir)
-        )
+        settled(projectEvidence(projectDir, harnessDir)) &&
+        hostSelection(
+          refreshedSelection,
+          knownPluginIdentities(projectDir, harnessDir),
+          synced,
+          deactivating,
+        ) === null
       ) {
-        return {
-          synced: plugins.map((plugin) => plugin.key).sort(),
-          pruned: [],
-          operations: 0,
-        };
+        return { synced, pruned: [], operations: 0, activated: [], deactivated: [], kept };
       }
       throw error;
     }
     return {
-      synced: plugins.map((plugin) => plugin.key).sort(),
+      synced,
       pruned,
       operations: plan.operations.length,
+      activated,
+      deactivated,
+      kept,
     };
   } finally {
     rmSync(stagingRoot, { recursive: true, force: true });
@@ -1599,7 +1818,12 @@ export async function main(argv: string[]): Promise<void> {
     if (command === "sync") {
       const result = await syncPlugins(projectDir, argv);
       const message = `plugin sync complete: ${result.synced.length} plugin(s)` +
-        (result.pruned.length > 0 ? `; pruned ${result.pruned.length} missing plugin(s)` : "");
+        (result.activated.length > 0 ? `; activated ${result.activated.join(", ")}` : "") +
+        (result.deactivated.length > 0 ? `; deactivated ${result.deactivated.join(", ")}` : "") +
+        (result.pruned.length > 0 ? `; pruned ${result.pruned.length} missing plugin(s)` : "") +
+        result.kept.map(({ key, reasons }) =>
+          `; ${key} stays active while ${reasons.join("; ")}`
+        ).join("");
       if (flags.json === "true") process.stdout.write(jsonEnvelope(0, message, result));
       else if (flags.quiet !== "true") process.stdout.write(`${message}\n`);
       return;

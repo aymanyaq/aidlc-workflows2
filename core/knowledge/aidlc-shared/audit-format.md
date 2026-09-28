@@ -107,7 +107,7 @@ operational evidence, not a tamper-proof human-authorship boundary.
 | Event | When | Required Fields | Emitter |
 |-------|------|-----------------|---------|
 | `SCOPE_CHANGED` | `--scope` changed existing scope | Timestamp, Old scope, New scope | `tools/aidlc-utility.ts` |
-| `PLUGIN_SELECTION_CHANGED` | `select-plugins` changed enabled plugins | Timestamp, Previous Selection, New Selection | `tools/aidlc-utility.ts select-plugins` |
+| `PLUGIN_SELECTION_CHANGED` | `select-plugins` changed enabled plugins, or `plugin sync` activated an installed plugin / deactivated one the host removed | Timestamp, Previous Selection, New Selection | `tools/aidlc-utility.ts select-plugins`, `tools/aidlc-plugin.ts sync` |
 | `DEPTH_CHANGED` | `--depth` changed depth level | Timestamp, Old depth, New depth | `tools/aidlc-utility.ts` |
 | `TEST_STRATEGY_CHANGED` | `--test-strategy` changed test strategy | Timestamp, Old strategy, New strategy | `tools/aidlc-utility.ts` |
 | `REVIEW_CLASS_CHANGED` | `--review` changed the per-run review override | Timestamp, Old Override, New Override | `tools/aidlc-utility.ts` |
